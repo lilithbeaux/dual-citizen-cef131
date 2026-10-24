@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Proxy Manager",
+  "description": "Configure proxy settings per session profile for multi-account browsing.",
+  "version": "1.0.0",
+  "icons": {
+    "128": "icon.png",
+    "48": "icon.png",
+    "16": "icon.png"
+  },
+  "permissions": [
+    "proxy",
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Proxy Manager",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "48": "icon.png"
+    }
+  }
+}

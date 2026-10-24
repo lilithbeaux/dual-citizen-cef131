@@ -1,0 +1,94 @@
+// ═══════════════════════════════════════════════════════════════
+// SPOOFING (native CEF ExecuteJavaScript)
+// ═══════════════════════════════════════════════════════════════
+
+function TControllerForm.SpoofTab(TabId: Integer; const ProfileData: TJSONObject; AppliedNow: PBoolean = nil): Boolean;
+var
+  spoof: TJSONObject;
+  ua, plat, lang, tz, res: string;
+  js: string;
+  idx: Integer;
+  tabFound: Boolean;
+  hasData: Boolean;
+  applied: Boolean;
+  dec: TSpoofDecision;
+begin
+  Result := False;
+  if ProfileData = nil then Exit;
+  idx := GetTabIndex(TabId);
+  tabFound := (idx >= 0);
+  if not tabFound then Exit;
+
+  spoof := ProfileData.Get('browser', TJSONObject.Create) as TJSONObject;
+
+  js := '';
+  ua := spoof.Get('user_agent', '');
+  if ua <> '' then
+    js := js + Format('Object.defineProperty(navigator,"userAgent",{get:()=>%s,configurable:true});', [QuotedStr(ua)]);
+
+  plat := spoof.Get('platform', '');
+  if plat <> '' then
+    js := js + Format('Object.defineProperty(navigator,"platform",{get:()=>%s,configurable:true});', [QuotedStr(plat)]);
+
+  lang := spoof.Get('language', '');
+  if lang <> '' then
+    js := js + Format('Object.defineProperty(navigator,"languages",{get:()=>["%s","en"],configurable:true});', [lang]);
+
+  res := spoof.Get('screen_resolution', '');
+  if res <> '' then
+    js := js + Format('var r="%s".split("x");if(r.length==2){Object.defineProperty(screen,"width",{get:()=>parseInt(r[0]),configurable:true});Object.defineProperty(screen,"height",{get:()=>parseInt(r[1]),configurable:true});}', [res]);
+
+  // Canvas anti-fingerprint
+  js := js + 'HTMLCanvasElement.prototype.toDataURL=function(){return HTMLCanvasElement.prototype.toDataURL.apply(this).replace(/[a-f0-9]/g,(c,i)=>i%7===0?String.fromCharCode(c.charCodeAt(0)^1):c)};';
+  // WebGL spoof
+  js := js + 'var gp=WebGLRenderingContext.prototype.getParameter;WebGLRenderingContext.prototype.getParameter=function(p){if(p===0x9245||p===0x8F9D)return"Google Inc.";if(p===0x9246||p===0x8F9C)return"ANGLE (Intel)";return gp.call(this,p)};';
+
+  tz := spoof.Get('timezone', '');
+  if tz <> '' then
+    js := js + Format('Intl.DateTimeFormat=new Proxy(Intl.DateTimeFormat,{construct:(t,a)=>{var o={...(a[1]||{})};o.timeZone="%s";return Reflect.construct(t,[a[0]||\"en-US\",o],t)}});', [tz]);
+
+  // Geolocation
+  if ProfileData.FindPath('address.lat') <> nil then
+    js := js + Format('navigator.geolocation.getCurrentPosition=(s)=>{s({coords:{latitude:%s,longitude:%s,accuracy:10},timestamp:Date.now()})};',
+      [ProfileData.FindPath('address.lat').AsString, ProfileData.FindPath('address.lng').AsString]);
+
+  // Determine if we have any spoofable data
+  hasData := (ua <> '') or (plat <> '') or (lang <> '') or (res <> '') or (tz <> '') or (ProfileData.FindPath('address.lat') <> nil);
+
+  // Check if we can apply NOW (frame exists and is main)
+  applied := False;
+  if tabFound and hasData then
+  begin
+    // Try to execute immediately if the browser/frame is ready
+    if (idx < FTabCount) and (FTabs[idx].ChromiumWindow <> nil) and
+       (FTabs[idx].ChromiumWindow.ChromiumBrowser <> nil) and
+       (FTabs[idx].ChromiumWindow.ChromiumBrowser.Browser <> nil) and
+       (FTabs[idx].ChromiumWindow.ChromiumBrowser.Browser.GetMainFrame <> nil) then
+    begin
+      FTabs[idx].ChromiumWindow.ChromiumBrowser.Browser.GetMainFrame.ExecuteJavaScript(js, '', 0);
+      applied := True;
+      WriteLn('[DCv2] Spoof JS applied immediately on Tab ', TabId, ': ', Length(js), ' bytes');
+    end;
+  end;
+
+  // Store spoof JS for this tab (executed on next LoadEnd if not applied now)
+  if idx >= Length(FSpoofJS) then
+    SetLength(FSpoofJS, idx + 1);
+  FSpoofJS[idx] := js;
+
+  // Build SpoofCore decision
+  dec := SpoofDecisionFromFlags(True, tabFound, hasData, applied, Length(js));
+
+  // Report back AppliedNow if caller wants it
+  if AppliedNow <> nil then
+    AppliedNow^ := (dec.Phase = spApplied);
+
+  Result := (dec.Phase <> spError);
+  WriteLn('[DCv2] Spoof decision for Tab ', TabId, ': phase=', Ord(dec.Phase), ' applied=', applied, ' js_bytes=', Length(js));
+end;
+
+// ═══════════════════════════════════════════════════════════════
+// COMMAND HANDLER (IPC Socket)
+// ═══════════════════════════════════════════════════════════════
+
+procedure TControllerForm.WriteProxyConfig;
