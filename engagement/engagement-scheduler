@@ -1,0 +1,5 @@
+#!/bin/sh
+# Common Sense Engagement — scheduler launcher
+# Runs the engagement daemon in the background.
+# 6 engagements per day at random intervals, Facebook + Reddit.
+exec python3 /home/veyron/.local/share/engagement/common_sense_engagement.py --scheduler >> /home/veyron/.local/share/engagement/scheduler.log 2>&1
