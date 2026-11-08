@@ -1,0 +1,5237 @@
+import { DECISION_MODE_KEY, DECISION_SETTINGS_KEYS, materializeLegacyDecisionFeatures, DEFAULT_DECISION_MODEL, WEBGPU_CHAT_DECISION_MODEL, resolveDecisionConfig, resolveDecisionMode } from '../agent/decision-config.js';
+import { normalizeLeanModeSetting } from '../agent/lean-mode.js';
+import { normalizeVisionModeSetting } from '../agent/vision-mode.js';
+import { normalizeVisionQuality } from '../agent/vision-budget.js';
+import { D1_CONSENT_KEY, D1_CONSENT_VERSION, D1_MODEL_ID } from '../providers/d1-config.js';
+import { chatDecisionModelFree, chatDecisionModelReady, d1LocalAssistReady } from '../agent/decision-availability.js';
+import { initD1Settings } from './d1-settings.js';
+/**
+ * WebBrain Settings pages — settings.html (preferences, budgets, memory,
+ * skills, CAPTCHA, Bridge, advanced), providers.html (the chat provider and
+ * the assistive models) and permissions.html (site permissions).
+ *
+ * One controller serves all three pages: each section below wires itself up
+ * only when its markup is on the current page.
+ */
+
+import { t, translationsForKey } from './i18n.js';
+import { escapeHtml } from './utils.js';
+import { MEDIA_PROVIDERS, mediaProvider, validateMediaConfig } from '../agent/media-config.js';
+import { THEME_MODES, applyMode, loadMode, watch } from './theme.js';
+import { renderSkillMarkdown } from './skill-markdown.js';
+import { CAPABILITY_LABEL, PERMISSION_GATE_SESSION_OFF_KEY } from '../agent/permission-gate.js';
+import {
+  CUSTOM_SKILLS_STORAGE_KEY,
+  DEFAULT_SKILL_SOURCES,
+  DEFAULT_SKILLS_REMOVED_STORAGE_KEY,
+  MAX_CUSTOM_SKILL_IMPORT_BYTES,
+  MAX_CUSTOM_SKILLS,
+  PACKAGED_SKILL_SOURCES,
+  fetchSkillImportResponse,
+  normalizeCustomSkills,
+  normalizeDefaultSkillRemovalIds,
+  readSkillImportText,
+  removeRetiredPackagedSkills,
+} from '../agent/skills.js';
+import {
+  USER_MEMORY_AUTO_CAPTURE_KEY,
+  USER_MEMORY_DEFAULT_MAX_PROMPT_CHARS,
+  USER_MEMORY_ENABLED_KEY,
+  USER_MEMORY_FORM_CAPTURE_KEY,
+  USER_MEMORY_MAX_PROMPT_CHARS_KEY,
+  normalizeUserMemoryMaxPromptChars,
+} from '../agent/user-memory.js';
+import { initCaptchaSettings } from './captcha-settings.js';
+import {
+  isValidTypesafeApiKey,
+  normalizeSystemOneThreshold,
+  normalizeTypesafeApiKey,
+} from '../agent/systemone-judge.js';
+import {
+  OPENROUTER_ROUTING_VARIANTS,
+  detectedCompatibilityPreset,
+  isNewOpenAIContractConfig,
+  normalizeOpenAICompatibleBaseUrl,
+  normalizeProviderCompatibility,
+  openRouterRoutingVariant,
+  parseProviderExtraBodyJson,
+  shouldUseOpenAIResponsesApi,
+} from '../providers/provider-compatibility.js';
+import {
+  DOWNLOAD_DIRECTORY_STORAGE_KEY,
+  normalizeDownloadDirectory,
+} from '../download-directory.js';
+import {
+  providerIconHtml,
+  providerIconUrl,
+  PROVIDER_SHORT_LABELS,
+  sniffProviderIdFromBaseUrl,
+} from './provider-icons.js';
+import { ADDITIONAL_PROVIDER_UI } from '../providers/provider-catalog.js';
+import { AUTO_VISION_PROVIDER_IDS, visionDetectionMatches } from '../providers/vision-capabilities.js';
+import { canonicalizeOllamaBaseUrl } from '../providers/context-windows.js';
+import {
+  WEBGPU_DEFAULT_MODEL_ID,
+  WEBGPU_MODEL_PRESETS,
+  WEBGPU_SELECTABLE_MODEL_PRESETS,
+  WEBGPU_VISION_AUTO_SELECTED_KEY,
+  WEBGPU_VISION_BONSAI_MODEL_ID,
+  WEBGPU_VISION_CHOICE_AUTO,
+  WEBGPU_VISION_CHOICE_BONSAI,
+  WEBGPU_VISION_CHOICE_COMPASS_VLD,
+  WEBGPU_VISION_COMPASS_VLD_MODEL_ID,
+  WEBGPU_VISION_CHOICE_KEY,
+  WEBGPU_VISION_CHOICE_OFF,
+  WEBGPU_VISION_CHOICE_WEBBRAIN_VL,
+  WEBGPU_VISION_CHOICES,
+  WEBGPU_VISION_CONSENT_VERSION,
+  WEBGPU_VISION_CONSENT_VERSION_KEY,
+  WEBGPU_VISION_DOWNLOAD_STATE_KEY,
+  WEBGPU_VISION_ENABLED_KEY,
+  normalizeWebgpuModelId,
+  webgpuModelDisplayName,
+  webgpuModelSupportsVision,
+} from '../providers/webgpu.js';
+import {
+  COMPANION_PREFERRED_MODEL_PATTERNS,
+  selectPreferredCompanionModel,
+} from '../providers/companion-config.js';
+import { AUTO_GROUP_TABS_KEY } from '../tab-group-preference.js';
+
+const VISION_UI_PROVIDER_IDS = new Set(['ollama', ...AUTO_VISION_PROVIDER_IDS]);
+const EASY_CLI_PROXY_GUIDE_URL = 'https://webbrain.one/docs/easy-cli-proxy/';
+const WEBBRAIN_COMPANION_SITE_URL = 'https://webbrain.one/companion/#download';
+const WEBBRAIN_COMPANION_DOWNLOAD_BASE = 'https://github.com/webbrain-one/webbrain/releases/download/systray-v0.1.2/WebBrain-Companion-0.1.2-';
+const SUBSCRIPTION_GUIDE_PRODUCTS = Object.freeze({
+  openai: 'ChatGPT/Codex',
+  anthropic: 'Claude',
+  gemini: 'Google/Gemini',
+  xai: 'Grok/xAI',
+  kimi: 'Kimi',
+});
+
+// Version shown in the subtitle. Kept here so it only needs one update per
+// release; the subtitle string itself is translated.
+const EXT_VERSION = '45.0.4';
+
+const providersContainer = document.getElementById('providers');
+const generalSearchInput = document.getElementById('input-general-search');
+const generalSearchEmpty = document.getElementById('general-search-empty');
+const apocalypseModeLink = document.getElementById('apocalypse-mode-link');
+const apocalypseModeStatus = document.getElementById('apocalypse-mode-status');
+const verboseToggle = document.getElementById('toggle-verbose');
+const composerDeliveryModeSelect = document.getElementById('select-composer-delivery-mode');
+const agentIndicatorStyleSelect = document.getElementById('select-agent-indicator-style');
+// Read by content/agent-visual-indicator.js; 'circuit' is the default.
+const AGENT_INDICATOR_STYLES = ['circuit', 'aurora', 'scan', 'gears', 'classic'];
+const selectionShortcutToggle = document.getElementById('toggle-selection-shortcut');
+const pdfViewerToggle = document.getElementById('toggle-pdf-viewer');
+const autoGroupTabsToggle = document.getElementById('toggle-auto-group-tabs');
+const helpImproveToggle = document.getElementById('toggle-help-improve');
+const newTabToggle = document.getElementById('toggle-newtab');
+const screenshotToggle = document.getElementById('toggle-screenshot-fallback');
+const maxStepsRange = document.getElementById('range-max-steps');
+const stepsValueLabel = document.getElementById('steps-value');
+const requestTimeoutRange = document.getElementById('range-request-timeout');
+const requestTimeoutValueLabel = document.getElementById('timeout-value');
+const clarifyTimeoutRange = document.getElementById('range-clarify-timeout');
+const clarifyTimeoutValueLabel = document.getElementById('clarify-timeout-value');
+const clarifyTimeoutPolicySelect = document.getElementById('select-clarify-timeout-policy');
+const costSessionLimitInput = document.getElementById('input-cost-session-limit');
+const costTotalLimitInput = document.getElementById('input-cost-total-limit');
+const costSpentValueLabel = document.getElementById('cost-spent-value');
+const btnResetCostSpend = document.getElementById('btn-reset-cost-spend');
+const autoScreenshotSelect = document.getElementById('select-auto-screenshot');
+const imageDetailSelect = document.getElementById('select-image-detail');
+const maxScreenshotsSelect = document.getElementById('select-max-screenshots');
+const maxImageDimensionSelect = document.getElementById('select-max-image-dimension');
+const siteAdaptersToggle = document.getElementById('toggle-site-adapters');
+const researchEscalationToggle = document.getElementById('toggle-research-escalation');
+const voiceInputToggle = document.getElementById('toggle-voice-input');
+const alwaysAllowApiMutationsToggle = document.getElementById('toggle-always-allow-api-mutations');
+const apiMutationObserverToggle = document.getElementById('toggle-api-mutation-observer');
+const webMcpToggle = document.getElementById('toggle-webmcp');
+const openAIAskStreamingToggle = document.getElementById('toggle-openai-ask-streaming');
+const planBeforeActModeSelect = document.getElementById('select-plan-before-act-mode');
+const planReviewModeSelect = document.getElementById('select-plan-review-mode');
+const planReviewConfidenceRange = document.getElementById('range-plan-review-confidence');
+const planReviewConfidenceValueLabel = document.getElementById('plan-review-confidence-value');
+const planReviewConfidenceRow = document.getElementById('row-plan-review-confidence');
+const notifySoundToggle = document.getElementById('toggle-notify-sound');
+const completionConfettiToggle = document.getElementById('toggle-completion-confetti');
+const completionFlashTabToggle = document.getElementById('toggle-completion-flash-tab');
+const tracingToggle = document.getElementById('toggle-tracing');
+const feedbackDiagnosticsToggle = document.getElementById('toggle-feedback-diagnostics');
+const strictSecretToggle = document.getElementById('toggle-strict-secret');
+const strictGuardsToggle = document.getElementById('toggle-strict-guards');
+const leanModeSelect = document.getElementById('select-lean-mode');
+const visionModeSelect = document.getElementById('select-vision-mode');
+const visionQualitySelect = document.getElementById('select-vision-quality');
+const allowLocalNetworkToggle = document.getElementById('toggle-allow-local-network');
+const scheduledTasksToggle = document.getElementById('toggle-scheduled-tasks');
+const scheduledConfirmToggle = document.getElementById('toggle-scheduled-confirm');
+const visionBaseUrlInput = document.getElementById('vision-base-url');
+const visionApiKeyInput = document.getElementById('vision-api-key');
+const visionModelInput = document.getElementById('vision-model');
+const btnSaveVision = document.getElementById('btn-save-vision');
+const webgpuVisionOption = document.getElementById('webgpu-vision-option');
+const webgpuVisionChoiceSelect = document.getElementById('webgpu-vision-choice');
+const webgpuVisionStatus = document.getElementById('webgpu-vision-status');
+const btnUseWebgpuVision = document.getElementById('btn-use-webgpu-vision');
+const visionEndpointFields = document.getElementById('vision-endpoint-fields');
+const skillNameInput = document.getElementById('skill-name');
+const skillUrlInput = document.getElementById('skill-url');
+const skillTextArea = document.getElementById('skill-text');
+const btnAddSkillUrl = document.getElementById('btn-add-skill-url');
+const btnAddSkillText = document.getElementById('btn-add-skill-text');
+const btnClearSkillForm = document.getElementById('btn-clear-skill-form');
+const skillsResult = document.getElementById('skills-result');
+const skillAddForm = document.getElementById('skill-add-form');
+const btnShowSkillForm = document.getElementById('btn-show-skill-form');
+const btnCancelSkillForm = document.getElementById('btn-cancel-skill-form');
+const skillsList = document.getElementById('skills-list');
+const packagedSkillsList = document.getElementById('packaged-skills-list');
+const skillPreviewDialog = document.getElementById('skill-preview-dialog');
+const skillPreviewTitle = document.getElementById('skill-preview-title');
+const skillPreviewSource = document.getElementById('skill-preview-source');
+const skillPreviewRendered = document.getElementById('skill-preview-rendered');
+const skillPreviewRaw = document.getElementById('skill-preview-raw');
+const skillPreviewViewButtons = document.querySelectorAll('[data-skill-preview-view]');
+// Transcription service (Whisper-compatible) — same shape as the vision
+// override but routes to /v1/audio/transcriptions instead of /v1/chat/completions.
+const transcriptionBaseUrlInput = document.getElementById('transcription-base-url');
+const transcriptionApiKeyInput = document.getElementById('transcription-api-key');
+const transcriptionModelInput = document.getElementById('transcription-model');
+const btnSaveTranscription = document.getElementById('btn-save-transcription');
+const btnTestTranscription = document.getElementById('btn-test-transcription');
+const btnClearTranscription = document.getElementById('btn-clear-transcription');
+const transcriptionTestResult = document.getElementById('test-transcription');
+// Generative Media — provider settings stored as imageGenModel.
+const imageGenProviderInput = document.getElementById('image-gen-provider');
+const imageGenBaseUrlInput = document.getElementById('image-gen-base-url');
+const imageGenWorkflowInput = document.getElementById('image-gen-workflow');
+const imageGenParametersInput = document.getElementById('image-gen-parameters');
+const imageGenApiKeyInput = document.getElementById('image-gen-api-key');
+const imageGenModelInput = document.getElementById('image-gen-model');
+const imageGenVideoModelInput = document.getElementById('image-gen-video-model');
+const imageGenVideoParametersInput = document.getElementById('image-gen-video-parameters');
+const imageGenVideoWorkflowInput = document.getElementById('image-gen-video-workflow');
+const btnSaveImageGen = document.getElementById('btn-save-image-gen');
+const btnTestImageGen = document.getElementById('btn-test-image-gen');
+const btnClearImageGen = document.getElementById('btn-clear-image-gen');
+const imageGenTestResult = document.getElementById('test-image-gen');
+const btnTestVision = document.getElementById('btn-test-vision');
+const btnClearVision = document.getElementById('btn-clear-vision');
+const visionTestResult = document.getElementById('test-vision');
+const profileEnabledToggle = document.getElementById('toggle-profile-enabled');
+const profileTextArea = document.getElementById('profile-text');
+const btnSaveProfile = document.getElementById('btn-save-profile');
+const btnClearProfile = document.getElementById('btn-clear-profile');
+const profileTestResult = document.getElementById('test-profile');
+const profileSyncStatus = document.getElementById('profile-sync-status');
+const profileSyncResult = document.getElementById('test-profile-sync');
+const profileSyncEmail = document.getElementById('profile-sync-email');
+const profileSyncPassword = document.getElementById('profile-sync-password');
+const profileSyncConfirm = document.getElementById('profile-sync-confirm');
+const profileSyncEmailField = document.getElementById('profile-sync-email-field');
+const profileSyncPasswordField = document.getElementById('profile-sync-password-field');
+const profileSyncConfirmField = document.getElementById('profile-sync-confirm-field');
+const profileSyncAdvanced = document.getElementById('profile-sync-advanced');
+const btnProfileSyncAuth = document.getElementById('btn-profile-sync-auth');
+const btnProfileSyncEnable = document.getElementById('btn-profile-sync-enable');
+const btnProfileSyncUnlock = document.getElementById('btn-profile-sync-unlock');
+const btnProfileSyncNow = document.getElementById('btn-profile-sync-now');
+const btnProfileSyncLock = document.getElementById('btn-profile-sync-lock');
+const btnProfileSyncChange = document.getElementById('btn-profile-sync-change');
+const btnProfileSyncDisable = document.getElementById('btn-profile-sync-disable');
+const btnProfileSyncReset = document.getElementById('btn-profile-sync-reset');
+const userMemoryEnabledToggle = document.getElementById('toggle-user-memory-enabled');
+const userMemoryAutoToggle = document.getElementById('toggle-user-memory-auto');
+const userMemoryFormToggle = document.getElementById('toggle-user-memory-form');
+const userMemoryMaxCharsInput = document.getElementById('input-user-memory-max-chars');
+const userMemoryList = document.getElementById('user-memory-list');
+const btnRefreshUserMemory = document.getElementById('btn-refresh-user-memory');
+const btnExportUserMemory = document.getElementById('btn-export-user-memory');
+const btnClearUserMemory = document.getElementById('btn-clear-user-memory');
+const userMemoryImportText = document.getElementById('user-memory-import-text');
+const btnImportUserMemory = document.getElementById('btn-import-user-memory');
+const userMemoryTestResult = document.getElementById('test-user-memory');
+const memcodeRecallToggle = document.getElementById('toggle-memcode-recall');
+const memcodeConnectButton = document.getElementById('btn-memcode-connect');
+const memcodeDisconnectButton = document.getElementById('btn-memcode-disconnect');
+const memcodeRecallResult = document.getElementById('test-memcode-recall');
+const decisionProviderInput = document.getElementById('decision-provider');
+const decisionModelInput = document.getElementById('decision-model');
+const decisionEndpointInput = document.getElementById('decision-endpoint');
+const decisionVisionInput = document.getElementById('decision-vision');
+const decisionDoneToggle = document.getElementById('toggle-decision-done');
+const decisionThresholdInput = document.getElementById('decision-done-threshold');
+let decisionModels = [];
+const refreshD1Settings = initD1Settings(sendToBackground);
+let decisionVisionSupported = false;
+const decisionKeyDrafts = new Map();
+let previousDecisionProvider = 'openrouter';
+// Decision providers that run locally and need no API key.
+const LOCAL_DECISION_PROVIDERS = ['local', 'webgpu_d1', 'webgpu_chat'];
+// In-browser decision providers with a fixed model and no API key.
+const FIXED_WEBGPU_DECISION_PROVIDERS = ['webgpu_d1', 'webgpu_chat'];
+// The in-browser chat model's decision mode has a fixed model and a note.
+// Runs after d1-settings.js on load and on every provider change, so it
+// owns the locked state for both fixed providers.
+function syncWebgpuDecisionProvider() {
+  const selected = decisionProviderInput?.value === 'webgpu_chat';
+  const fixed = FIXED_WEBGPU_DECISION_PROVIDERS.includes(decisionProviderInput?.value);
+  const note = document.getElementById('webgpu-decision-note');
+  if (note) note.hidden = !selected;
+  if (selected) decisionModelInput.value = WEBGPU_CHAT_DECISION_MODEL;
+  // Lock both controls for D1 and the chat model; restore them otherwise.
+  if (decisionModelInput) decisionModelInput.readOnly = fixed;
+  if (systemOneApiKeyInput) systemOneApiKeyInput.disabled = fixed;
+}
+
+// Auto, On or Off. Auto uses a downloaded Compass VLD Tiny v5 or D1, or else
+// Compass's managed model while Compass is the chat provider. Only On shows the provider fields and the
+// per-decision switches, so the card asks nothing until someone wants to
+// configure it.
+const decisionModeInputs = [...document.querySelectorAll('input[name="decision-mode"]')];
+function selectedDecisionMode() {
+  return decisionModeInputs.find(input => input.checked)?.value || 'auto';
+}
+function setDecisionMode(mode) {
+  for (const input of decisionModeInputs) input.checked = input.value === mode;
+}
+function activeProviderIsCompass() {
+  const config = providersData?.[activeProviderId];
+  return !!activeProviderId && (providerDefinitionId(activeProviderId) === 'webbrain_cloud' || config?.providerName === 'webbrain-cloud');
+}
+// The Strict Secret Mode switch is on settings.html and the decision card on
+// providers.html, so the card follows the stored setting, not the switch.
+let strictSecretModeOn = false;
+if (globalThis.chrome?.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.strictSecretMode) return;
+    strictSecretModeOn = changes.strictSecretMode.newValue === true;
+    void syncDecisionStatus();
+  });
+}
+let decisionStatusSequence = 0;
+async function syncDecisionStatus() {
+  if (!decisionModeInputs.length) return;
+  const mode = selectedDecisionMode();
+  for (const description of document.querySelectorAll('[data-decision-mode-desc]')) description.hidden = description.dataset.decisionModeDesc !== mode;
+  const configured = document.getElementById('decision-configured');
+  if (configured) configured.hidden = mode !== 'on';
+  if (btnSaveSystemOne) btnSaveSystemOne.hidden = mode !== 'on';
+  const status = document.getElementById('decision-auto-status');
+  const sequence = ++decisionStatusSequence;
+  if (mode !== 'auto') {
+    if (status) status.hidden = true;
+    if (btnTestSystemOne) btnTestSystemOne.hidden = mode === 'off';
+    return;
+  }
+  // Strict Secret Mode keeps page content away from every decision model, so Auto has nothing to use.
+  const strict = strictSecretModeOn;
+  const compass = !strict && activeProviderIsCompass();
+  // Auto uses Compass VLD Tiny v5 once it is downloaded, unless the active
+  // provider keeps another in-browser model loaded, else D1, Compass or not
+  // (decision-availability.js).
+  const chatModel = !strict && await chatDecisionModelReady()
+    && await chatDecisionModelFree(() => sendToBackground('get_in_browser_models').then(result => result?.models));
+  const local = !strict && !chatModel
+    && (await chrome.storage.local.get(D1_CONSENT_KEY).catch(() => ({})))?.[D1_CONSENT_KEY] === D1_CONSENT_VERSION
+    && await d1LocalAssistReady();
+  if (sequence !== decisionStatusSequence || selectedDecisionMode() !== 'auto') return;
+  const key = strict ? 'st.decision.status.strict' : chatModel ? 'st.decision.status.chat_model' : local ? 'st.decision.status.local' : compass ? 'st.decision.status.compass' : 'st.decision.status.none';
+  if (status) {
+    status.dataset.i18n = key;
+    status.dataset.state = compass || local || chatModel ? 'active' : 'inactive';
+    status.textContent = t(key);
+    status.hidden = false;
+  }
+  // Test runs here in the browser, so it can check the on-device models but
+  // not Compass's managed model.
+  if (btnTestSystemOne) btnTestSystemOne.hidden = !local && !chatModel;
+}
+for (const input of decisionModeInputs) {
+  input.addEventListener('change', async () => {
+    if (!input.checked) return;
+    const mode = input.value;
+    void syncDecisionStatus();
+    // The mode applies at once; On's provider fields still use Save.
+    // A pre-mode On profile shows its stored switches; keep them when the explicit mode replaces that reading.
+    const legacyFeatures = materializeLegacyDecisionFeatures(await chrome.storage.local.get(DECISION_SETTINGS_KEYS));
+    await chrome.storage.local.set({ ...legacyFeatures, [DECISION_MODE_KEY]: mode, systemOneEnabled: mode === 'on' });
+    // Off ends D1's Download or Load; Auto keeps it, since Auto uses a
+    // downloaded D1.
+    if (mode === 'off') await sendToBackground('d1_control', { command: 'reset' }).catch(() => {});
+    showSystemOneResult('ok', t('st.providers.saved'));
+  });
+}
+// A download in another tab or Settings section changes what Auto uses.
+globalThis.addEventListener?.('focus', () => { void syncDecisionStatus(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void syncDecisionStatus(); });
+
+const systemOneApiKeyInput = document.getElementById('system-one-api-key');
+const systemOneWatchToggle = document.getElementById('toggle-system-one-watch');
+const systemOneCompletionToggle = document.getElementById('toggle-system-one-completion');
+const systemOneWatchThresholdRange = document.getElementById('range-system-one-watch-threshold');
+const systemOneWatchThresholdValue = document.getElementById('system-one-watch-threshold-value');
+const systemOneCompletionThresholdRange = document.getElementById('range-system-one-completion-threshold');
+const systemOneCompletionThresholdValue = document.getElementById('system-one-completion-threshold-value');
+const btnSaveSystemOne = document.getElementById('btn-save-system-one');
+const systemOneClassificationsToggle = document.getElementById('toggle-system-one-classifications');
+const systemOneBrowserToggle = document.getElementById('toggle-system-one-browser');
+const btnTestSystemOne = document.getElementById('btn-test-system-one');
+const btnClearSystemOne = document.getElementById('btn-clear-system-one');
+const systemOneTestResult = document.getElementById('test-system-one');
+const themeSelect = document.getElementById('select-theme');
+const downloadDirectoryInput = document.getElementById('input-download-directory');
+const subtitleEl = document.getElementById('subtitle');
+
+// --- Appearance / theme ---
+// Loaded from chrome.storage.local (canonical) with a localStorage mirror
+// kept in sync by theme.js — so the FOUC bootstrap in <head> always has the
+// latest mode on next page open. watch() keeps every open extension page
+// (the settings pages + the side panel) in sync if any one of them flips it.
+// Only settings.html has the picker; the other pages still follow changes.
+let currentThemeMode = 'system';
+loadMode().then((mode) => {
+  currentThemeMode = mode;
+  if (themeSelect) themeSelect.value = mode;
+  applyMode(mode, { syncStorage: false }); // already loaded, just paint
+});
+themeSelect?.addEventListener('change', async () => {
+  const mode = THEME_MODES.includes(themeSelect.value) ? themeSelect.value : 'system';
+  currentThemeMode = mode;
+  await applyMode(mode);
+});
+watch(() => currentThemeMode);
+// If another Settings tab or the side panel flips the theme, watch()
+// already re-paints this page — but the closure variable and the select
+// value won't update on their own. Without this, the picker drifts out
+// of sync and a later OS-theme flip can re-apply the stale 'system'.
+if (globalThis.chrome?.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.themeMode) return;
+    const next = changes.themeMode.newValue;
+    if (!THEME_MODES.includes(next)) return;
+    currentThemeMode = next;
+    if (themeSelect && themeSelect.value !== next) themeSelect.value = next;
+  });
+}
+
+function renderSubtitle() {
+  if (subtitleEl) subtitleEl.textContent = t(subtitleEl.dataset.subtitleKey || 'st.subtitle', { version: EXT_VERSION });
+}
+renderSubtitle();
+
+// The heading is a link only so it gets the pointer people expect from a
+// logo; swallow the click so it never leaves a stray '#' in the URL.
+document.getElementById('settings-title-link')?.addEventListener('click', (event) => {
+  event.preventDefault();
+});
+
+function normalizeGeneralSearchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function searchTextForGeneralItem(item) {
+  const searchableNodes = [item, ...Array.from(item.querySelectorAll('[id], [data-i18n], [data-i18n-html], [data-i18n-placeholder]'))];
+  const keyedText = searchableNodes
+    .map((el) => [
+      el.id,
+      el.dataset?.i18n,
+      el.dataset?.i18nHtml,
+      el.dataset?.i18nPlaceholder,
+    ].filter(Boolean).join(' '))
+    .join(' ');
+  return normalizeGeneralSearchText(`${item.textContent || ''} ${keyedText}`);
+}
+
+// The search hides rows with a class of its own and leaves the hidden
+// attribute to the code that owns each row, so clearing a search cannot bring
+// back a card that is hidden for another reason (a managed CAPTCHA card, say).
+function setGeneralSearchHidden(item, hidden) {
+  item.classList.toggle('general-search-hidden', hidden);
+}
+
+// The search box covers the tabs marked data-search (General, Budgets,
+// CAPTCHA and Advanced). With a query, those tabs show together and keep only
+// their matching rows; settings-tabs.js clears the query when a tab is picked.
+const searchPanels = Array.from(document.querySelectorAll('.tab-panel[data-search]'));
+
+function filterGeneralSettings() {
+  if (!generalSearchInput || !searchPanels.length) return;
+  const query = normalizeGeneralSearchText(generalSearchInput.value);
+  document.body.classList.toggle('settings-searching', !!query);
+  let totalMatches = 0;
+  for (const panel of searchPanels) {
+    const scope = panel.querySelector('[data-search-scope]') || panel;
+    let panelMatches = 0;
+    for (const item of Array.from(scope.children)) {
+      const matches = !query || (!item.hidden && searchTextForGeneralItem(item).includes(query));
+      setGeneralSearchHidden(item, !!query && !matches);
+      if (matches) panelMatches += 1;
+    }
+    setGeneralSearchHidden(panel, !!query && panelMatches === 0);
+    totalMatches += panelMatches;
+  }
+  if (generalSearchEmpty) {
+    generalSearchEmpty.hidden = !query || totalMatches > 0;
+  }
+}
+
+generalSearchInput?.addEventListener('input', filterGeneralSettings);
+
+// The language is chosen in the side panel; i18n.js re-translates the static
+// markup, and this re-renders what the script writes itself.
+document.addEventListener('wb-locale-changed', () => {
+  renderSubtitle();
+  filterGeneralSettings();
+  renderProviders();
+  renderSkills();
+  renderPermissions();
+  if (profileSyncStatus) refreshProfileSyncState();
+  refreshApocalypseModeStatus();
+});
+globalThis.addEventListener('focus', () => {
+  refreshApocalypseModeStatus();
+  loadVisionConfig().catch(() => {});
+});
+
+let providersData = {};
+// Unsaved custom-body text must survive provider-card/filter/search renders,
+// including temporarily invalid JSON while the user is still editing it.
+// Keep the raw UI draft separate from the last valid provider config.
+const providerCompatibilityJsonDrafts = new Map();
+const dirtyProviderIds = new Set();
+let activeProviderId = '';
+let providerActivationRequestId = 0;
+let requestedActiveProviderId = '';
+let currentVisionConfig = {};
+// In-browser vision: the stored choice, the model it resolves to now, and the
+// state the status line and action button need (see renderLocalVision).
+let webgpuVisionChoice = WEBGPU_VISION_CHOICE_AUTO;
+let webgpuVisionLocal = { model: null, compassVldReady: false, bonsaiReady: false, readiness: null, chatDownload: null };
+let webgpuVisionPollTimer = null;
+
+if (globalThis.chrome?.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes[WEBGPU_VISION_ENABLED_KEY] || changes[WEBGPU_VISION_CONSENT_VERSION_KEY]) {
+      loadVisionConfig().catch(() => {});
+    } else if (changes[WEBGPU_VISION_CHOICE_KEY] || changes[WEBGPU_VISION_DOWNLOAD_STATE_KEY]) {
+      // Download progress lands here often; coalesce it into one refresh.
+      scheduleLocalVisionRefresh();
+    }
+    if (!changes.providers?.newValue) return;
+    for (const [id, next] of Object.entries(changes.providers.newValue)) {
+      if (!providersData[id] || next.visionDetection === undefined) continue;
+      // Background detection may finish while the settings page contains
+      // unsaved drafts. Refresh only the detected result.
+      providersData[id].visionDetection = next.visionDetection || null;
+      const definitionId = providerDefinitionId(id);
+      if (VISION_UI_PROVIDER_IDS.has(definitionId)) {
+        refreshVisionStatus(id);
+      }
+    }
+  });
+}
+
+const WEBBRAIN_SUBSCRIBE_URL = 'https://webbrain.one/subscribe';
+const WEBBRAIN_ACCOUNT_URL = 'https://api.webbrain.one/account';
+const WEBBRAIN_BILLING_STATUS_URL = 'https://api.webbrain.one/v1/billing/status';
+
+const DEFAULT_COST_ALLOWANCE_USD = 10;
+const MAX_AGENT_STEPS_DEFAULT = 130;
+const MAX_AGENT_STEPS_UNLIMITED_SENTINEL = 200;
+const PLAN_BEFORE_ACT_MODES = new Set(['try', 'strict', 'off']);
+const PLAN_REVIEW_MODES = new Set(['confidence', 'always', 'never']);
+// Product default: auto-approve plans at 75% confidence to reduce review stops.
+// Planner prompt still tells the LLM to reserve 90%+ for straightforward plans;
+// that intentional gap keeps model scoring conservative without over-pausing.
+const PLAN_REVIEW_CONFIDENCE_DEFAULT = 75;
+
+function normalizePlanBeforeActMode(stored = {}) {
+  if (PLAN_BEFORE_ACT_MODES.has(stored.planBeforeActMode)) return stored.planBeforeActMode;
+  if (stored.planBeforeAct === true) return 'strict';
+  if (stored.planBeforeAct === false) return 'off';
+  return 'try';
+}
+
+function normalizePlanReviewMode(stored = {}) {
+  return PLAN_REVIEW_MODES.has(stored.planReviewMode) ? stored.planReviewMode : 'confidence';
+}
+
+function normalizePlanReviewConfidenceThreshold(stored = {}) {
+  let threshold = Number(stored.planReviewConfidenceThreshold);
+  if (!Number.isFinite(threshold)) threshold = PLAN_REVIEW_CONFIDENCE_DEFAULT;
+  if (threshold > 0 && threshold <= 1) threshold *= 100;
+  return Math.max(50, Math.min(99, Math.round(threshold)));
+}
+
+function updatePlanReviewConfidenceUI() {
+  if (!planReviewConfidenceRange || !planReviewConfidenceValueLabel) return;
+  planReviewConfidenceValueLabel.textContent = `${planReviewConfidenceRange.value}%`;
+  const thresholdEnabled = !planReviewModeSelect || planReviewModeSelect.value === 'confidence';
+  planReviewConfidenceRange.disabled = !thresholdEnabled;
+  if (planReviewConfidenceRow) {
+    planReviewConfidenceRow.classList.toggle('setting-row-muted', !thresholdEnabled);
+  }
+}
+
+function normalizeCostAmount(value, fallback = DEFAULT_COST_ALLOWANCE_USD) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function formatUsd(value) {
+  return '$' + normalizeCostAmount(value, 0).toFixed(2);
+}
+
+function renderCostAllowanceSpent(spent, limit) {
+  if (!costSpentValueLabel) return;
+  costSpentValueLabel.textContent = `${formatUsd(spent)} / ${formatUsd(limit)}`;
+}
+
+function webbrainSubscribeUrl(deviceGuid) {
+  const url = new URL(WEBBRAIN_SUBSCRIBE_URL);
+  if (deviceGuid) {
+    url.searchParams.set('client_reference_id', deviceGuid);
+  }
+  return url.toString();
+}
+
+function webbrainAccountUrl(deviceGuid) {
+  const url = new URL(WEBBRAIN_ACCOUNT_URL);
+  if (deviceGuid) {
+    url.searchParams.set('client_reference_id', deviceGuid);
+  }
+  return url.toString();
+}
+
+function isUnlimitedMaxAgentSteps(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && (n === 0 || n >= MAX_AGENT_STEPS_UNLIMITED_SENTINEL);
+}
+
+function boundedMaxAgentSteps(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 5 && n < MAX_AGENT_STEPS_UNLIMITED_SENTINEL
+    ? Math.floor(n)
+    : MAX_AGENT_STEPS_DEFAULT;
+}
+
+// Filter + collapse state for the providers panel. With 11+ providers the
+// flat list is unwieldy — filter keeps the visual surface small, and
+// per-card collapse defaults non-active cards to header-only so the page
+// doesn't scroll forever.
+let providerFilter = 'all';     // 'all' | 'active' | 'local' | 'cloud' | 'router'
+let providerSearchQuery = '';
+const expandedProviders = new Set(); // ids the user explicitly expanded this session
+let editingSkillId = null;
+let customSkills = [];
+let skillPreviewRequestId = 0;
+const DEFAULT_SKILL_IDS = new Set(DEFAULT_SKILL_SOURCES.map((source) => source.id));
+
+function formatArchiveBytes(value) {
+  const number = Math.max(0, Number(value) || 0);
+  if (number < 1024) return `${number} B`;
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let amount = number;
+  let unit = -1;
+  do { amount /= 1024; unit += 1; } while (amount >= 1024 && unit < units.length - 1);
+  return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[unit]}`;
+}
+
+async function refreshApocalypseModeStatus() {
+  if (!apocalypseModeStatus) return;
+  try {
+    const status = await sendToBackground('apocalypse_mode', { command: 'status' });
+    const enabled = status?.enabled === true;
+    const summary = enabled
+      ? t('st.display.apocalypse_mode.status.summary', {
+        count: Number(status.installedCount) || 0,
+        size: formatArchiveBytes(status.totalBytes),
+        policy: t(status.updatePolicy === 'automatic' ? 'ap.metric.automatic' : 'ap.metric.manual'),
+      })
+      : t('st.display.apocalypse_mode.status.off');
+    apocalypseModeStatus.textContent = summary;
+    if (apocalypseModeLink) {
+      apocalypseModeLink.dataset.enabled = String(enabled);
+      apocalypseModeLink.title = summary;
+    }
+  } catch {
+    const unavailable = t('st.display.apocalypse_mode.status.unavailable');
+    apocalypseModeStatus.textContent = unavailable;
+    if (apocalypseModeLink) {
+      delete apocalypseModeLink.dataset.enabled;
+      apocalypseModeLink.title = unavailable;
+    }
+  }
+}
+
+// --- Init ---
+
+async function init() {
+  // Migration: the old auth.webbrain.one sign-in stored a bearer token and
+  // account info here. Billing is now device-GUID based and there is no sign-in
+  // UI, so purge any stale credentials left over from that flow.
+  chrome.storage.local.remove(['authToken', 'authEmail', 'authDefaultModel']).catch(() => {});
+
+  // Load display settings
+  const stored = await chrome.storage.local.get([...DECISION_SETTINGS_KEYS, 'verboseMode', 'composerDeliveryMode', 'agentIndicatorStyle', 'selectionShortcutEnabled', 'pdfViewerEnabled', AUTO_GROUP_TABS_KEY, 'helpImproveWebBrain', 'newTabEnabled', 'screenshotFallback', 'maxAgentSteps', 'autoScreenshot', 'useSiteAdapters', 'researchEscalationEnabled', 'researchEscalationEngine', 'voiceInputEnabled', 'alwaysAllowApiMutations', 'apiMutationObserverEnabled', 'webMcpEnabled', 'openaiAskStreamingEnabled', 'planBeforeActMode', 'planBeforeAct', 'planReviewMode', 'planReviewConfidenceThreshold', DOWNLOAD_DIRECTORY_STORAGE_KEY, 'notifySound', 'completionConfetti', 'completionFlashTab', 'tracingEnabled', 'feedbackDiagnosticsEnabled', 'strictSecretMode', 'strictGuards', 'leanMode', 'visionMode', 'visionQuality', 'agentAllowLocalNetwork', 'scheduledTasksEnabled', 'scheduledRequireConsequentialConfirmation', 'systemOneEnabled', 'systemOneWatchEnabled', 'systemOneCompletionEnabled', 'systemOneFastClassifications', 'systemOneFastBrowser', 'systemOneWatchThreshold', 'systemOneCompletionThreshold', 'typesafeApiKey', 'providerFilter', 'requestTimeoutMs', 'clarifyTimeoutSec', 'clarifyTimeoutSemanticsV2', 'clarifyTimeoutPolicy', 'costAllowanceSessionUsd', 'costAllowanceTotalUsd', 'meteredProviderCostSpentUsd', 'screenshotRedaction', 'imageDetail', 'maxScreenshotsPerTurn', 'maxImageDimension']);
+  if (typeof stored.providerFilter === 'string' && ['all','active','local','cloud','router'].includes(stored.providerFilter)) {
+    providerFilter = stored.providerFilter;
+  }
+  strictSecretModeOn = stored.strictSecretMode === true;
+  if (verboseToggle) verboseToggle.checked = stored.verboseMode || false;
+  if (composerDeliveryModeSelect) {
+    composerDeliveryModeSelect.value = stored.composerDeliveryMode === 'steer' ? 'steer' : 'queue';
+  }
+  if (agentIndicatorStyleSelect) {
+    agentIndicatorStyleSelect.value = AGENT_INDICATOR_STYLES.includes(stored.agentIndicatorStyle) ? stored.agentIndicatorStyle : 'circuit';
+  }
+  if (selectionShortcutToggle) selectionShortcutToggle.checked = stored.selectionShortcutEnabled !== false;
+  if (pdfViewerToggle) pdfViewerToggle.checked = stored.pdfViewerEnabled === undefined || stored.pdfViewerEnabled === true;
+  if (autoGroupTabsToggle) autoGroupTabsToggle.checked = stored[AUTO_GROUP_TABS_KEY] !== false;
+  if (helpImproveToggle) helpImproveToggle.checked = stored.helpImproveWebBrain !== false; // on by default
+  if (newTabToggle) newTabToggle.checked = stored.newTabEnabled === true; // opt-in: off until chosen
+  if (screenshotToggle) screenshotToggle.checked = stored.screenshotFallback ?? true; // on by default
+  if (maxStepsRange && stepsValueLabel) {
+    if (isUnlimitedMaxAgentSteps(stored.maxAgentSteps)) {
+      maxStepsRange.value = MAX_AGENT_STEPS_UNLIMITED_SENTINEL;
+      stepsValueLabel.textContent = '∞';
+    } else {
+      maxStepsRange.value = boundedMaxAgentSteps(stored.maxAgentSteps);
+      stepsValueLabel.textContent = maxStepsRange.value;
+    }
+  }
+  // requestTimeoutMs is stored in milliseconds, displayed as seconds.
+  // Default 60s when unset. Floor 10s / ceiling 600s matches the slider.
+  if (requestTimeoutRange && requestTimeoutValueLabel) {
+    const tMs = (typeof stored.requestTimeoutMs === 'number' && stored.requestTimeoutMs > 0)
+      ? stored.requestTimeoutMs
+      : 120000;
+    const tSec = Math.max(10, Math.min(600, Math.round(tMs / 1000)));
+    requestTimeoutRange.value = tSec;
+    requestTimeoutValueLabel.textContent = tSec + 's';
+  }
+  // Clarify auto-timeout: 0 = Instant, 1–1200s wait, >1200 (1205) = Off. Default 60s.
+  if (clarifyTimeoutRange && clarifyTimeoutValueLabel) {
+    const raw = Number(stored.clarifyTimeoutSec);
+    let cSec = 60;
+    if (Number.isFinite(raw) && raw >= 0) {
+      cSec = raw > 1200 ? 1205 : Math.min(1200, Math.floor(raw));
+    }
+    // One-shot migration: old 0 meant Off; new Off is 1205.
+    if (!stored.clarifyTimeoutSemanticsV2) {
+      const updates = { clarifyTimeoutSemanticsV2: true };
+      if (Number(stored.clarifyTimeoutSec) === 0) {
+        cSec = 1205;
+        updates.clarifyTimeoutSec = 1205;
+      }
+      chrome.storage.local.set(updates).catch(() => {});
+    }
+    clarifyTimeoutRange.value = cSec;
+    clarifyTimeoutValueLabel.textContent = formatClarifyTimeoutLabel(cSec);
+  }
+  // What a timeout answers: 'finish' (default) keeps the task moving.
+  if (clarifyTimeoutPolicySelect) {
+    clarifyTimeoutPolicySelect.value = stored.clarifyTimeoutPolicy === 'safe' ? 'safe' : 'finish';
+  }
+  // On navigation (default) captures after the agent opens a page, not after
+  // every click or keystroke.
+  if (autoScreenshotSelect) autoScreenshotSelect.value = stored.autoScreenshot || 'navigation';
+  if (imageDetailSelect) imageDetailSelect.value = stored.imageDetail || 'auto';
+  if (maxScreenshotsSelect) maxScreenshotsSelect.value = String(stored.maxScreenshotsPerTurn != null ? stored.maxScreenshotsPerTurn : 0);
+  if (maxImageDimensionSelect) maxImageDimensionSelect.value = String(stored.maxImageDimension || 1568);
+  if (siteAdaptersToggle) siteAdaptersToggle.checked = stored.useSiteAdapters ?? true;
+  if (researchEscalationToggle) researchEscalationToggle.checked = stored.researchEscalationEnabled === true;
+  if (voiceInputToggle) voiceInputToggle.checked = stored.voiceInputEnabled ?? true;
+  if (alwaysAllowApiMutationsToggle) alwaysAllowApiMutationsToggle.checked = stored.alwaysAllowApiMutations === undefined || stored.alwaysAllowApiMutations === true;
+  if (apiMutationObserverToggle) apiMutationObserverToggle.checked = stored.apiMutationObserverEnabled === undefined || stored.apiMutationObserverEnabled === true;
+  if (webMcpToggle) webMcpToggle.checked = stored.webMcpEnabled !== false; // on by default
+  if (openAIAskStreamingToggle) openAIAskStreamingToggle.checked = stored.openaiAskStreamingEnabled !== false;
+  if (planBeforeActModeSelect) {
+    planBeforeActModeSelect.value = normalizePlanBeforeActMode(stored);
+  }
+  if (planReviewModeSelect) {
+    planReviewModeSelect.value = normalizePlanReviewMode(stored);
+  }
+  if (planReviewConfidenceRange) {
+    planReviewConfidenceRange.value = normalizePlanReviewConfidenceThreshold(stored);
+    updatePlanReviewConfidenceUI();
+  }
+  if (downloadDirectoryInput) {
+    downloadDirectoryInput.value = normalizeDownloadDirectory(stored[DOWNLOAD_DIRECTORY_STORAGE_KEY]);
+  }
+  if (notifySoundToggle) notifySoundToggle.checked = stored.notifySound ?? true; // on by default
+  if (completionConfettiToggle) completionConfettiToggle.checked = stored.completionConfetti ?? true; // on by default
+  if (completionFlashTabToggle) completionFlashTabToggle.checked = stored.completionFlashTab ?? true; // on by default
+  // One switch records traces with full request details, or neither.
+  if (tracingToggle) tracingToggle.checked = stored.tracingEnabled === true;
+  if (feedbackDiagnosticsToggle) feedbackDiagnosticsToggle.checked = stored.feedbackDiagnosticsEnabled !== false;
+  const sessionLimit = normalizeCostAmount(stored.costAllowanceSessionUsd);
+  const totalLimit = normalizeCostAmount(stored.costAllowanceTotalUsd);
+  const totalSpent = normalizeCostAmount(stored.meteredProviderCostSpentUsd, 0);
+  if (costSessionLimitInput) costSessionLimitInput.value = sessionLimit.toFixed(2);
+  if (costTotalLimitInput) costTotalLimitInput.value = totalLimit.toFixed(2);
+  renderCostAllowanceSpent(totalSpent, totalLimit);
+  if (strictSecretToggle) {
+    strictSecretToggle.checked = stored.strictSecretMode === true; // off by default
+  }
+  if (strictGuardsToggle) {
+    strictGuardsToggle.checked = stored.strictGuards === true; // off by default
+  }
+  if (leanModeSelect) leanModeSelect.value = normalizeLeanModeSetting(stored.leanMode); // auto by default
+  if (visionModeSelect) visionModeSelect.value = normalizeVisionModeSetting(stored.visionMode); // Auto by default
+  if (visionQualitySelect) visionQualitySelect.value = normalizeVisionQuality(stored.visionQuality); // balanced by default
+  if (allowLocalNetworkToggle) {
+    allowLocalNetworkToggle.checked = stored.agentAllowLocalNetwork === true; // off by default
+  }
+  // Bridge (MCP + Cloud Bridge + WebMCP) lives in Settings → Bridge.
+  // settings-cloud-bridge.js is the sole owner of webbrainCloudBridge* keys.
+  if (scheduledTasksToggle) {
+    scheduledTasksToggle.checked = stored.scheduledTasksEnabled !== false; // on by default
+  }
+  if (scheduledConfirmToggle) {
+    scheduledConfirmToggle.checked = stored.scheduledRequireConsequentialConfirmation !== false; // on by default
+  }
+  // The On fields show the configuration On uses: a profile in On as it is
+  // stored, any other with On's defaults.
+  if (decisionProviderInput) {
+    const storedDecisionMode = resolveDecisionMode(stored);
+    setDecisionMode(storedDecisionMode);
+    const decisionConfig = resolveDecisionConfig(storedDecisionMode === 'on' ? stored : { ...stored, [DECISION_MODE_KEY]: 'on' });
+    decisionProviderInput.value = previousDecisionProvider = decisionConfig.provider;
+    decisionModelInput.value = decisionConfig.model;
+    decisionEndpointInput.value = stored.decisionBaseUrl || 'http://127.0.0.1:8009';
+    decisionVisionInput.value = stored.decisionVisionMode || 'auto';
+    decisionVisionSupported = stored.decisionVisionSupported === true;
+    decisionThresholdInput.value = String(decisionConfig.threshold * 100);
+    await refreshD1Settings();
+    syncWebgpuDecisionProvider();
+    decisionKeyDrafts.set('typesafe', stored.typesafeApiKey || '');
+    decisionKeyDrafts.set('openrouter', stored.decisionApiKey || '');
+    decisionKeyDrafts.set('local', stored.decisionLocalApiKey || '');
+    document.getElementById('decision-endpoint-field').hidden = decisionConfig.provider !== 'local';
+    decisionDoneToggle.checked = decisionConfig.features.done;
+    if (systemOneWatchToggle) systemOneWatchToggle.checked = decisionConfig.features.watch;
+    if (systemOneClassificationsToggle) systemOneClassificationsToggle.checked = decisionConfig.features.classifications;
+    if (systemOneBrowserToggle) systemOneBrowserToggle.checked = decisionConfig.features.browser;
+    if (systemOneCompletionToggle) systemOneCompletionToggle.checked = decisionConfig.features.completion;
+    if (systemOneApiKeyInput) systemOneApiKeyInput.value = decisionConfig.apiKey;
+    if (systemOneWatchThresholdRange) systemOneWatchThresholdRange.value = String(normalizeSystemOneThreshold(stored.systemOneWatchThreshold) * 100);
+    if (systemOneCompletionThresholdRange) systemOneCompletionThresholdRange.value = String(normalizeSystemOneThreshold(stored.systemOneCompletionThreshold) * 100);
+    void syncDecisionStatus();
+    updateSystemOneThresholdLabels();
+  }
+
+  // Load vision model config
+  await loadVisionConfig();
+
+  // Load transcription service config. Same shape as visionModel; used by
+  // recorder/host.js → transcribe.js when transcribing recorded audio.
+  const transcriptionStored = await chrome.storage.local.get(['transcriptionModel']);
+  const transcription = transcriptionStored.transcriptionModel || {};
+  if (transcriptionBaseUrlInput) transcriptionBaseUrlInput.value = transcription.baseUrl || '';
+  if (transcriptionApiKeyInput) transcriptionApiKeyInput.value = transcription.apiKey || '';
+  if (transcriptionModelInput) transcriptionModelInput.value = transcription.model || '';
+  updateMultimodalDetectedProvider('vision');
+  updateMultimodalDetectedProvider('transcription');
+
+  // Load Generative Media config. Used by the generate_image agent tool.
+  const imageGenStored = await chrome.storage.local.get(['imageGenModel']);
+  renderImageGenConfig(imageGenStored.imageGenModel || {});
+
+  // Load profile (auto-fill bio + throwaway password)
+  const profileStored = await chrome.storage.local.get(['profileEnabled', 'profileText']);
+  if (profileEnabledToggle) profileEnabledToggle.checked = !!profileStored.profileEnabled;
+  if (profileTextArea) profileTextArea.value = profileStored.profileText || '';
+  await loadUserMemorySettings();
+  await loadMemcodeStatus();
+
+  // Each provider has independent key, enable state, and fallback weight.
+  await initCaptchaSettings(chrome.storage.local, sendToBackground, t);
+
+  await loadCustomSkills();
+
+  // Load site permissions (capability × origin grants) + the master switch
+  await initPermissionGateToggle();
+  await renderPermissions();
+  await initScreenshotRedactionToggle();
+  await refreshApocalypseModeStatus();
+
+  // Load providers. The decision card's Auto status reads the active one too.
+  if (providersContainer || decisionModeInputs.length) {
+    const res = await sendToBackground('get_providers');
+    providersData = res.providers;
+    activeProviderId = res.active;
+    renderProviders();
+    void syncDecisionStatus();
+  }
+  // Tooling (UI tests, docs screenshots) waits for this before reading the page.
+  document.documentElement.dataset.settingsReady = 'true';
+}
+
+// --- Site permissions (capability × origin grants) ---
+
+const PERMISSIONS_KEY = 'wb_permissions';
+const GATE_KEY = 'askBeforeConsequentialActions';
+
+// Prompts are off when the stored setting is false or the side panel's skip
+// dialog turned them off until the browser closes (storage.session).
+async function readAskBeforeConsequential() {
+  const [stored, session] = await Promise.all([
+    chrome.storage.local.get(GATE_KEY),
+    Promise.resolve().then(() => chrome.storage.session.get(PERMISSION_GATE_SESSION_OFF_KEY)).catch(() => ({})),
+  ]);
+  return (stored?.[GATE_KEY] ?? true) && session?.[PERMISSION_GATE_SESSION_OFF_KEY] !== true; // gate ON by default
+}
+
+function renderPermissionGateToggle(askBefore) {
+  const toggle = document.getElementById('toggle-permission-gate');
+  const warning = document.getElementById('permission-gate-warning');
+  if (toggle) toggle.checked = askBefore;
+  if (warning) warning.style.display = askBefore ? 'none' : '';
+}
+
+async function initPermissionGateToggle() {
+  const toggle = document.getElementById('toggle-permission-gate');
+  if (!toggle) return;
+  renderPermissionGateToggle(await readAskBeforeConsequential());
+  toggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ [GATE_KEY]: toggle.checked });
+    // Turning prompts back on also ends a "this session only" skip.
+    if (toggle.checked) {
+      await Promise.resolve()
+        .then(() => chrome.storage.session.remove(PERMISSION_GATE_SESSION_OFF_KEY))
+        .catch(() => {});
+    }
+    renderPermissionGateToggle(toggle.checked);
+  });
+}
+
+// Screenshot redaction (issue #312): local, best-effort PII blurring on
+// screenshots BEFORE they are sent to a vision model. OFF by default.
+const REDACTION_KEY = 'screenshotRedaction';
+async function initScreenshotRedactionToggle() {
+  const toggle = document.getElementById('toggle-screenshot-redaction');
+  if (!toggle) return;
+  const stored = await chrome.storage.local.get(REDACTION_KEY);
+  toggle.checked = stored[REDACTION_KEY] === true; // OFF by default
+  toggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ [REDACTION_KEY]: toggle.checked });
+  });
+}
+
+async function renderPermissions() {
+  const listEl = document.getElementById('permissions-list');
+  const actionsEl = document.getElementById('permissions-actions');
+  if (!listEl) return;
+
+  const stored = await chrome.storage.local.get(PERMISSIONS_KEY);
+  const grants = Array.isArray(stored[PERMISSIONS_KEY]) ? stored[PERMISSIONS_KEY] : [];
+
+  if (grants.length === 0) {
+    listEl.innerHTML = `<div class="setting-desc">${escapeHtml(t('st.perms.empty'))}</div>`;
+    if (actionsEl) actionsEl.style.display = 'none';
+    return;
+  }
+
+  // Stable display order: host, then capability.
+  grants.sort((a, b) =>
+    String(a.host || '').localeCompare(String(b.host || '')) ||
+    String(a.capability || '').localeCompare(String(b.capability || '')));
+
+  listEl.innerHTML = grants.map((g) => {
+    const verb = CAPABILITY_LABEL[g.capability] || g.capability;
+    const denied = g.action === 'deny';
+    const desc = denied ? t('st.perms.blocked', { verb }) : t('st.perms.allowed', { verb });
+    // host + capability uniquely identify a grant (record() dedupes per pair).
+    // Keep them in SEPARATE data attributes — no delimiter to round-trip wrong.
+    return `
+      <div class="setting-row" style="align-items:center;">
+        <div class="setting-info">
+          <div class="setting-label">${denied ? '⛔ ' : ''}${escapeHtml(String(g.host || ''))}</div>
+          <div class="setting-desc">${escapeHtml(desc)}</div>
+        </div>
+        <button class="btn-secondary" data-cap="${escapeHtml(String(g.capability || ''))}" data-host="${escapeHtml(String(g.host || ''))}">${escapeHtml(t('st.perms.revoke'))}</button>
+      </div>`;
+  }).join('');
+
+  if (actionsEl) actionsEl.style.display = 'flex';
+
+  listEl.querySelectorAll('button[data-cap]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const capability = btn.dataset.cap;
+      const host = btn.dataset.host;
+      const cur = (await chrome.storage.local.get(PERMISSIONS_KEY))[PERMISSIONS_KEY] || [];
+      const next = cur.filter((g) => !(g.capability === capability && g.host === host));
+      await chrome.storage.local.set({ [PERMISSIONS_KEY]: next });
+      renderPermissions();
+    });
+  });
+}
+
+document.getElementById('btn-clear-all-permissions')?.addEventListener('click', async () => {
+  await chrome.storage.local.set({ [PERMISSIONS_KEY]: [] });
+  renderPermissions();
+});
+
+// Live-sync the Permissions tab when grants (or the master switch) change
+// elsewhere while this page is open — e.g. the agent records a new "Always
+// allow" grant from the side-panel permission card. Without this the list
+// shows a stale snapshot until a manual refresh.
+if (globalThis.chrome?.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes[PERMISSIONS_KEY]) renderPermissions();
+    // Either switch can change prompts: the stored setting, or the side
+    // panel's "this session only" skip in storage.session.
+    if ((area === 'local' && changes[GATE_KEY])
+        || (area === 'session' && changes[PERMISSION_GATE_SESSION_OFF_KEY])) {
+      void readAskBeforeConsequential().then(renderPermissionGateToggle).catch(() => {});
+    }
+  });
+}
+
+// --- Skills ---
+
+function makeSkillId() {
+  return `skill_${Date.now().toString(36)}_${globalThis.crypto.randomUUID()}`;
+}
+
+function showSkillsResult(className, text, color = '') {
+  if (!skillsResult) return null;
+  skillsResult.className = `test-result show${className ? ` ${className}` : ''}`;
+  skillsResult.textContent = text;
+  skillsResult.style.color = color || '';
+  return skillsResult;
+}
+
+function flashSkillsResult(className, text) {
+  const resultEl = showSkillsResult(className, text);
+  if (resultEl) setTimeout(() => resultEl.classList.remove('show'), 3000);
+}
+
+function isLoopbackHostname(hostname) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
+}
+
+function normalizeSkillUrl(raw) {
+  let url;
+  try {
+    url = new URL(String(raw || '').trim());
+  } catch {
+    throw new Error(t('st.skills.error.url'));
+  }
+  const isHttpLoopback = url.protocol === 'http:' && isLoopbackHostname(url.hostname);
+  if (url.protocol !== 'https:' && !isHttpLoopback) {
+    throw new Error(t('st.skills.error.url'));
+  }
+  return url.href;
+}
+
+function extractSkillText(raw, contentType = '') {
+  const text = String(raw || '');
+  if (/html/i.test(contentType)) {
+    const doc = new DOMParser().parseFromString(text, 'text/html');
+    doc.querySelectorAll('script, style, noscript').forEach((el) => el.remove());
+    const body = (doc.body?.innerText || doc.body?.textContent || '').trim();
+    const title = (doc.title || '').trim();
+    return [title ? `# ${title}` : '', body].filter(Boolean).join('\n\n').trim();
+  }
+  return text.trim();
+}
+
+function setSkillPreviewView(view) {
+  const showRaw = view === 'raw';
+  if (skillPreviewRendered) skillPreviewRendered.hidden = showRaw;
+  if (skillPreviewRaw) skillPreviewRaw.hidden = !showRaw;
+  skillPreviewViewButtons.forEach((button) => {
+    button.setAttribute('aria-pressed', String(button.dataset.skillPreviewView === view));
+  });
+}
+
+function setSkillPreviewContent(content) {
+  const text = String(content || '');
+  if (skillPreviewRendered) skillPreviewRendered.innerHTML = renderSkillMarkdown(text);
+  if (skillPreviewRaw) skillPreviewRaw.textContent = text;
+}
+
+function openSkillPreview(name, source, content) {
+  if (!skillPreviewDialog || !skillPreviewTitle || !skillPreviewSource || !skillPreviewRendered || !skillPreviewRaw) return;
+  skillPreviewTitle.textContent = name;
+  skillPreviewSource.textContent = source;
+  setSkillPreviewContent(content);
+  setSkillPreviewView('rendered');
+  if (skillPreviewDialog.open) return;
+  if (typeof skillPreviewDialog.showModal === 'function') skillPreviewDialog.showModal();
+  else skillPreviewDialog.setAttribute('open', '');
+}
+
+function closeSkillPreview() {
+  skillPreviewRequestId += 1;
+  if (!skillPreviewDialog) return;
+  if (typeof skillPreviewDialog.close === 'function') skillPreviewDialog.close();
+  else skillPreviewDialog.removeAttribute('open');
+}
+
+async function loadPackagedSkillContent(source) {
+  const response = await fetch(chrome.runtime.getURL(source.path));
+  if (!response.ok) throw new Error(t('st.skills.error.fetch', { status: response.status }));
+  return response.text();
+}
+
+async function previewPackagedSkill(skillId) {
+  const source = PACKAGED_SKILL_SOURCES.find((item) => item.id === skillId);
+  if (!source) return;
+  const requestId = ++skillPreviewRequestId;
+  openSkillPreview(source.name, t('st.skills.source.built_in'), t('st.providers.loading'));
+  try {
+    const content = await loadPackagedSkillContent(source);
+    if (requestId === skillPreviewRequestId) setSkillPreviewContent(content);
+  } catch (error) {
+    if (requestId === skillPreviewRequestId) {
+      setSkillPreviewContent(error?.message || t('st.skills.error.fetch', { status: '—' }));
+    }
+  }
+}
+
+function previewEnabledSkill(skillId) {
+  const skill = customSkills.find((item) => item.id === skillId);
+  if (!skill) return;
+  skillPreviewRequestId += 1;
+  const source = skill.sourceType === 'built-in'
+    ? t('st.skills.source.built_in')
+    : skill.sourceType === 'url' && skill.sourceUrl ? skill.sourceUrl : t('st.skills.source.raw');
+  openSkillPreview(skill.name, source, skill.content);
+}
+
+skillPreviewDialog?.addEventListener('click', (event) => {
+  if (event.target === skillPreviewDialog || event.target.closest('.skill-preview-dialog-close')) {
+    closeSkillPreview();
+  }
+});
+skillPreviewViewButtons.forEach((button) => {
+  button.addEventListener('click', () => setSkillPreviewView(button.dataset.skillPreviewView));
+});
+
+async function loadCustomSkills() {
+  if (!skillsList) return;
+  const stored = await chrome.storage.local.get(CUSTOM_SKILLS_STORAGE_KEY);
+  customSkills = normalizeCustomSkills(removeRetiredPackagedSkills(stored[CUSTOM_SKILLS_STORAGE_KEY]));
+  renderSkills();
+}
+
+async function saveCustomSkills(nextSkills, opts = {}) {
+  customSkills = normalizeCustomSkills(nextSkills);
+  const update = { [CUSTOM_SKILLS_STORAGE_KEY]: customSkills };
+  const removedSkill = opts.removedSkill;
+  const installedSkill = opts.installedSkill;
+  const removedDefault = (removedSkill?.sourceType === 'built-in' || DEFAULT_SKILL_IDS.has(removedSkill?.id)) && DEFAULT_SKILL_IDS.has(removedSkill?.id);
+  const installedDefault = installedSkill?.sourceType === 'built-in' && DEFAULT_SKILL_IDS.has(installedSkill.id);
+  if (removedDefault || installedDefault) {
+    const stored = await chrome.storage.local.get(DEFAULT_SKILLS_REMOVED_STORAGE_KEY);
+    let removedIds = normalizeDefaultSkillRemovalIds(stored[DEFAULT_SKILLS_REMOVED_STORAGE_KEY]);
+    if (removedDefault && !removedIds.includes(removedSkill.id)) removedIds.push(removedSkill.id);
+    if (installedDefault) removedIds = removedIds.filter((id) => id !== installedSkill.id);
+    update[DEFAULT_SKILLS_REMOVED_STORAGE_KEY] = removedIds;
+  }
+  await chrome.storage.local.set(update);
+  renderSkills();
+}
+
+function renderPackagedSkills() {
+  if (!packagedSkillsList) return;
+  const installedIds = new Set(customSkills.map((skill) => skill.id));
+  const available = PACKAGED_SKILL_SOURCES.filter((source) => !installedIds.has(source.id));
+  if (available.length === 0) {
+    packagedSkillsList.innerHTML = `<div class="setting-desc">${escapeHtml(t('st.skills.available.empty'))}</div>`;
+    return;
+  }
+  packagedSkillsList.innerHTML = available.map((source) => `
+    <div class="setting-row" style="align-items:center;">
+      <div class="setting-info">
+        <button type="button" class="setting-label skill-name-button"
+                data-packaged-skill-preview-id="${escapeHtml(source.id)}">${escapeHtml(source.name)}</button>
+        <div class="setting-desc skill-source">${escapeHtml(t('st.skills.source.built_in'))}</div>
+      </div>
+      <button class="btn-secondary" data-packaged-skill-id="${escapeHtml(source.id)}">${escapeHtml(t('st.skills.enable'))}</button>
+    </div>`).join('');
+
+  packagedSkillsList.querySelectorAll('button[data-packaged-skill-preview-id]').forEach((btn) => {
+    btn.addEventListener('click', () => previewPackagedSkill(btn.dataset.packagedSkillPreviewId));
+  });
+  packagedSkillsList.querySelectorAll('button[data-packaged-skill-id]').forEach((btn) => {
+    btn.addEventListener('click', () => addPackagedSkill(btn.dataset.packagedSkillId, btn));
+  });
+}
+
+function renderSkills() {
+  if (!skillsList) return;
+  renderPackagedSkills();
+  if (customSkills.length === 0) {
+    skillsList.innerHTML = `<div class="setting-desc">${escapeHtml(t('st.skills.empty'))}</div>`;
+    return;
+  }
+
+  skillsList.innerHTML = customSkills.map((skill) => {
+    const source = skill.sourceType === 'built-in'
+      ? t('st.skills.source.built_in')
+      : skill.sourceType === 'url' && skill.sourceUrl ? skill.sourceUrl : t('st.skills.source.raw');
+    const toolNames = (skill.tools || []).map((tool) => tool.name).filter(Boolean);
+    const toolSummary = toolNames.length
+      ? ` · ${t('st.skills.item.tools', { tools: toolNames.join(', ') })}`
+      : '';
+    return `
+      <div class="setting-row" style="align-items:center;">
+        <div class="setting-info">
+          <button type="button" class="setting-label skill-name-button"
+                  data-skill-preview-id="${escapeHtml(skill.id)}">${escapeHtml(skill.name)}</button>
+          <div class="setting-desc skill-source">${escapeHtml(source)} · ${escapeHtml(t('st.skills.item.chars', { count: skill.content.length }))}${escapeHtml(toolSummary)}</div>
+        </div>
+        <button class="btn-secondary" data-skill-edit-id="${escapeHtml(skill.id)}">${escapeHtml(t('st.skills.edit'))}</button>
+        <button class="btn-secondary" data-skill-id="${escapeHtml(skill.id)}">${escapeHtml(t('st.skills.remove'))}</button>
+      </div>`;
+  }).join('');
+
+  skillsList.querySelectorAll('button[data-skill-preview-id]').forEach((btn) => {
+    btn.addEventListener('click', () => previewEnabledSkill(btn.dataset.skillPreviewId));
+  });
+  skillsList.querySelectorAll('button[data-skill-edit-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const skill = customSkills.find((s) => s.id === btn.dataset.skillEditId);
+      if (skill) startSkillEdit(skill);
+    });
+  });
+  skillsList.querySelectorAll('button[data-skill-id]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (editingSkillId === btn.dataset.skillId) {
+        cancelSkillEdit();
+        closeSkillForm();
+      }
+      const removedSkill = customSkills.find((skill) => skill.id === btn.dataset.skillId);
+      await saveCustomSkills(
+        customSkills.filter((skill) => skill.id !== btn.dataset.skillId),
+        { removedSkill },
+      );
+      flashSkillsResult('ok', t('st.skills.removed'));
+    });
+  });
+}
+
+async function addCustomSkill(record, opts = {}) {
+  if (customSkills.length >= MAX_CUSTOM_SKILLS) {
+    throw new Error(t('st.skills.error.limit', { count: MAX_CUSTOM_SKILLS }));
+  }
+  const next = normalizeCustomSkills([...customSkills, record]);
+  if (next.length <= customSkills.length) {
+    throw new Error(t('st.skills.error.empty_content'));
+  }
+  await saveCustomSkills(next, opts);
+}
+
+async function addPackagedSkill(skillId, button) {
+  const source = PACKAGED_SKILL_SOURCES.find((item) => item.id === skillId);
+  if (!source || customSkills.some((skill) => skill.id === skillId)) return;
+  if (button) button.disabled = true;
+  try {
+    const record = {
+      id: source.id,
+      name: source.name,
+      sourceType: 'built-in',
+      sourceUrl: source.path,
+      content: await loadPackagedSkillContent(source),
+      createdAt: Date.now(),
+    };
+    await addCustomSkill(record, { installedSkill: record });
+    flashSkillsResult('ok', t('st.skills.added'));
+  } catch (e) {
+    if (button) button.disabled = false;
+    flashSkillsResult('fail', e.message || t('st.skills.error.add_failed'));
+  }
+}
+
+// The add-skill form stays closed until Add skill (or Edit on an enabled
+// skill) opens it, so the enabled and available skills come first. Results
+// show outside it, so Enable and Remove are confirmed while it is closed.
+function setSkillFormOpen(open) {
+  if (skillAddForm) skillAddForm.hidden = !open;
+  if (btnShowSkillForm) btnShowSkillForm.hidden = open;
+}
+
+function openSkillForm() {
+  setSkillFormOpen(true);
+  skillNameInput?.focus?.();
+}
+
+function closeSkillForm() {
+  const focusInForm = !!skillAddForm?.contains?.(document.activeElement);
+  setSkillFormOpen(false);
+  if (focusInForm) btnShowSkillForm?.focus?.();
+}
+
+function startSkillEdit(skill) {
+  skillFormGeneration += 1;
+  setSkillFormOpen(true);
+  editingSkillId = skill.id;
+  if (skillNameInput) skillNameInput.value = skill.name || '';
+  if (skillTextArea) skillTextArea.value = skill.content || '';
+  if (btnAddSkillText) btnAddSkillText.textContent = t('st.providers.save');
+  flashSkillsResult('ok', skill.name || t('st.skills.edit'));
+  skillNameInput?.focus?.();
+  if (skillTextArea) skillTextArea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function cancelSkillEdit() {
+  if (editingSkillId == null) return;
+  editingSkillId = null;
+  if (btnAddSkillText) btnAddSkillText.textContent = t('st.skills.add_text');
+  if (skillNameInput) skillNameInput.value = '';
+  if (skillTextArea) skillTextArea.value = '';
+}
+
+async function addSkillFromText() {
+  const content = (skillTextArea?.value || '').trim();
+  if (!content) {
+    flashSkillsResult('fail', t('st.skills.error.empty_text'));
+    return;
+  }
+  try {
+    if (editingSkillId) {
+      const original = customSkills.find((s) => s.id === editingSkillId);
+      if (!original) {
+        cancelSkillEdit();
+        throw new Error(t('st.skills.error.add_failed'));
+      }
+      const isBuiltIn = original.sourceType === 'built-in';
+      const updated = {
+        id: original.id,
+        name: (skillNameInput?.value || '').trim() || original.name || '',
+        sourceType: isBuiltIn ? 'text' : (original.sourceType || 'text'),
+        sourceUrl: isBuiltIn ? '' : (original.sourceUrl || ''),
+        content,
+        createdAt: original.createdAt || Date.now(),
+      };
+      const next = customSkills.map((s) => (s.id === editingSkillId ? updated : s));
+      await saveCustomSkills(next);
+      cancelSkillEdit();
+      closeSkillForm();
+      flashSkillsResult('ok', t('st.providers.saved'));
+      return;
+    }
+    await addCustomSkill({
+      id: makeSkillId(),
+      name: skillNameInput?.value || '',
+      sourceType: 'text',
+      content,
+      createdAt: Date.now(),
+    });
+    if (skillNameInput) skillNameInput.value = '';
+    if (skillTextArea) skillTextArea.value = '';
+    closeSkillForm();
+    flashSkillsResult('ok', t('st.skills.added'));
+  } catch (e) {
+    flashSkillsResult('fail', e.message || t('st.skills.error.add_failed'));
+  }
+}
+
+// The URL import in flight: Cancel aborts it, so a cancelled import adds no
+// skill. Cancel, Clear form and Edit also start a new form generation; an
+// import that finishes after one of them adds its skill but leaves the form
+// as the user has it now.
+let skillUrlImport = null;
+let skillFormGeneration = 0;
+
+function resetSkillUrlButton() {
+  if (!btnAddSkillUrl) return;
+  btnAddSkillUrl.disabled = false;
+  btnAddSkillUrl.textContent = t('st.skills.add_url');
+}
+
+async function addSkillFromUrl() {
+  let url;
+  try {
+    url = normalizeSkillUrl(skillUrlInput?.value);
+  } catch (e) {
+    flashSkillsResult('fail', e.message);
+    return;
+  }
+
+  skillUrlImport?.abort();
+  const controller = new AbortController();
+  skillUrlImport = controller;
+  const generation = skillFormGeneration;
+  // The name as it was when the import started.
+  const name = skillNameInput?.value || '';
+  if (btnAddSkillUrl) {
+    btnAddSkillUrl.disabled = true;
+    btnAddSkillUrl.textContent = t('st.skills.loading_url');
+  }
+  showSkillsResult('', t('st.skills.loading_url'), 'var(--text2)');
+
+  try {
+    const { response, url: finalUrl } = await fetchSkillImportResponse(url, {
+      validateUrl: normalizeSkillUrl,
+      redirectMessage: t('st.skills.error.url'),
+      init: { signal: controller.signal },
+    });
+    if (!response.ok) throw new Error(t('st.skills.error.fetch', { status: response.status }));
+    const content = extractSkillText(
+      await readSkillImportText(response, {
+        maxBytes: MAX_CUSTOM_SKILL_IMPORT_BYTES,
+        tooLargeMessage: t('st.skills.error.too_large'),
+      }),
+      response.headers.get('content-type') || '',
+    );
+    if (!content) throw new Error(t('st.skills.error.empty_content'));
+    if (controller.signal.aborted) return;
+    await addCustomSkill({
+      id: makeSkillId(),
+      name,
+      sourceType: 'url',
+      sourceUrl: finalUrl,
+      content,
+      createdAt: Date.now(),
+    });
+    if (generation === skillFormGeneration) {
+      if (skillNameInput) skillNameInput.value = '';
+      if (skillUrlInput) skillUrlInput.value = '';
+      closeSkillForm();
+    }
+    flashSkillsResult('ok', t('st.skills.added'));
+  } catch (e) {
+    if (controller.signal.aborted) return;
+    flashSkillsResult('fail', e.message || t('st.skills.error.add_failed'));
+  } finally {
+    if (skillUrlImport === controller) {
+      skillUrlImport = null;
+      resetSkillUrlButton();
+    }
+  }
+}
+
+btnAddSkillText?.addEventListener('click', addSkillFromText);
+btnAddSkillUrl?.addEventListener('click', addSkillFromUrl);
+btnShowSkillForm?.addEventListener('click', openSkillForm);
+btnCancelSkillForm?.addEventListener('click', () => {
+  skillFormGeneration += 1;
+  if (skillUrlImport) {
+    skillUrlImport.abort();
+    skillUrlImport = null;
+    resetSkillUrlButton();
+    skillsResult?.classList.remove('show');
+  }
+  cancelSkillEdit();
+  if (skillNameInput) skillNameInput.value = '';
+  if (skillUrlInput) skillUrlInput.value = '';
+  if (skillTextArea) skillTextArea.value = '';
+  closeSkillForm();
+});
+btnClearSkillForm?.addEventListener('click', () => {
+  skillFormGeneration += 1;
+  cancelSkillEdit();
+  if (skillNameInput) skillNameInput.value = '';
+  if (skillUrlInput) skillUrlInput.value = '';
+  if (skillTextArea) skillTextArea.value = '';
+  flashSkillsResult('ok', t('st.skills.form_cleared'));
+});
+
+if (globalThis.chrome?.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes[CUSTOM_SKILLS_STORAGE_KEY]) return;
+    customSkills = normalizeCustomSkills(removeRetiredPackagedSkills(changes[CUSTOM_SKILLS_STORAGE_KEY].newValue));
+    renderSkills();
+  });
+}
+
+// --- Display Settings ---
+
+composerDeliveryModeSelect?.addEventListener('change', async () => {
+  const mode = composerDeliveryModeSelect.value === 'steer' ? 'steer' : 'queue';
+  await chrome.storage.local.set({ composerDeliveryMode: mode }).catch(() => {});
+});
+
+agentIndicatorStyleSelect?.addEventListener('change', async () => {
+  const style = AGENT_INDICATOR_STYLES.includes(agentIndicatorStyleSelect.value) ? agentIndicatorStyleSelect.value : 'circuit';
+  await chrome.storage.local.set({ agentIndicatorStyle: style }).catch(() => {});
+});
+
+downloadDirectoryInput?.addEventListener('input', () => {
+  downloadDirectoryInput.setCustomValidity('');
+});
+
+downloadDirectoryInput?.addEventListener('change', async () => {
+  const raw = String(downloadDirectoryInput.value || '').trim();
+  const directory = normalizeDownloadDirectory(raw);
+  if (raw && !directory) {
+    downloadDirectoryInput.setCustomValidity(t('st.display.download_directory.error'));
+    downloadDirectoryInput.reportValidity();
+    return;
+  }
+  downloadDirectoryInput.setCustomValidity('');
+  downloadDirectoryInput.value = directory;
+  await chrome.storage.local.set({ [DOWNLOAD_DIRECTORY_STORAGE_KEY]: directory }).catch(() => {});
+});
+
+verboseToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ verboseMode: verboseToggle.checked }).catch(() => {});
+});
+
+selectionShortcutToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ selectionShortcutEnabled: selectionShortcutToggle.checked }).catch(() => {});
+});
+
+pdfViewerToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ pdfViewerEnabled: pdfViewerToggle.checked }).catch(() => {});
+});
+
+autoGroupTabsToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ [AUTO_GROUP_TABS_KEY]: autoGroupTabsToggle.checked }).catch(() => {});
+});
+
+newTabToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ newTabEnabled: newTabToggle.checked }).catch(() => {});
+});
+
+helpImproveToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ helpImproveWebBrain: helpImproveToggle.checked }).catch(() => {});
+});
+
+screenshotToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ screenshotFallback: screenshotToggle.checked }).catch(() => {});
+});
+
+maxStepsRange?.addEventListener('input', () => {
+  stepsValueLabel.textContent = Number(maxStepsRange.value) === MAX_AGENT_STEPS_UNLIMITED_SENTINEL ? '∞' : maxStepsRange.value;
+});
+
+maxStepsRange?.addEventListener('change', async () => {
+  await chrome.storage.local.set({
+    maxAgentSteps: Number(maxStepsRange.value) === MAX_AGENT_STEPS_UNLIMITED_SENTINEL
+      ? 0
+      : parseInt(maxStepsRange.value, 10),
+  }).catch(() => {});
+});
+
+if (requestTimeoutRange) {
+  requestTimeoutRange.addEventListener('input', () => {
+    requestTimeoutValueLabel.textContent = requestTimeoutRange.value + 's';
+  });
+  requestTimeoutRange.addEventListener('change', async () => {
+    // Stored as ms (the provider code consumes ms). UI shows seconds.
+    const sec = parseInt(requestTimeoutRange.value, 10);
+    await chrome.storage.local.set({ requestTimeoutMs: sec * 1000 }).catch(() => {});
+  });
+}
+
+function formatClarifyTimeoutLabel(sec) {
+  if (sec === 0) {
+    return (typeof t === 'function' ? t('st.display.clarify_timeout.instant') : null) || 'Instant';
+  }
+  if (sec > 1200) {
+    return (typeof t === 'function' ? t('st.display.clarify_timeout.off') : null) || 'Off';
+  }
+  return `${sec}s`;
+}
+
+if (clarifyTimeoutRange) {
+  clarifyTimeoutRange.addEventListener('input', () => {
+    if (clarifyTimeoutValueLabel) {
+      clarifyTimeoutValueLabel.textContent = formatClarifyTimeoutLabel(parseInt(clarifyTimeoutRange.value, 10) || 0);
+    }
+  });
+  clarifyTimeoutRange.addEventListener('change', async () => {
+    const sec = Math.max(0, Math.min(1205, parseInt(clarifyTimeoutRange.value, 10) || 0));
+    await chrome.storage.local.set({ clarifyTimeoutSec: sec, clarifyTimeoutSemanticsV2: true }).catch(() => {});
+  });
+}
+
+clarifyTimeoutPolicySelect?.addEventListener('change', async () => {
+  const policy = clarifyTimeoutPolicySelect.value === 'safe' ? 'safe' : 'finish';
+  await chrome.storage.local.set({ clarifyTimeoutPolicy: policy }).catch(() => {});
+});
+
+autoScreenshotSelect?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ autoScreenshot: autoScreenshotSelect.value }).catch(() => {});
+});
+
+imageDetailSelect?.addEventListener('change', async () => {
+  const v = imageDetailSelect.value;
+  const imageDetail = (v === 'high' || v === 'low' || v === 'auto') ? v : 'auto';
+  imageDetailSelect.value = imageDetail;
+  await chrome.storage.local.set({ imageDetail }).catch(() => {});
+});
+
+maxScreenshotsSelect?.addEventListener('change', async () => {
+  let n = parseInt(maxScreenshotsSelect.value, 10);
+  if (!Number.isFinite(n) || n < 0) n = 0;
+  if (n > 5) n = 5;
+  maxScreenshotsSelect.value = String(n);
+  await chrome.storage.local.set({ maxScreenshotsPerTurn: n }).catch(() => {});
+});
+
+maxImageDimensionSelect?.addEventListener('change', async () => {
+  let n = parseInt(maxImageDimensionSelect.value, 10);
+  if (!Number.isFinite(n) || n <= 0) n = 1568;
+  n = Math.max(1, Math.min(2048, n));
+  maxImageDimensionSelect.value = String(n);
+  await chrome.storage.local.set({ maxImageDimension: n }).catch(() => {});
+});
+
+siteAdaptersToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ useSiteAdapters: siteAdaptersToggle.checked }).catch(() => {});
+});
+
+if (researchEscalationToggle) {
+  researchEscalationToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({
+      researchEscalationEnabled: researchEscalationToggle.checked,
+      researchEscalationEngine: 'chatgpt',
+    }).catch(() => {});
+  });
+}
+
+if (voiceInputToggle) {
+  voiceInputToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ voiceInputEnabled: voiceInputToggle.checked }).catch(() => {});
+  });
+}
+
+apiMutationObserverToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ apiMutationObserverEnabled: apiMutationObserverToggle.checked }).catch(() => {});
+});
+
+alwaysAllowApiMutationsToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ alwaysAllowApiMutations: alwaysAllowApiMutationsToggle.checked }).catch(() => {});
+});
+
+if (webMcpToggle) {
+  webMcpToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ webMcpEnabled: webMcpToggle.checked }).catch(() => {});
+  });
+}
+
+if (openAIAskStreamingToggle) {
+  openAIAskStreamingToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ openaiAskStreamingEnabled: openAIAskStreamingToggle.checked }).catch(() => {});
+  });
+}
+
+if (planBeforeActModeSelect) {
+  planBeforeActModeSelect.addEventListener('change', async () => {
+    const mode = PLAN_BEFORE_ACT_MODES.has(planBeforeActModeSelect.value) ? planBeforeActModeSelect.value : 'off';
+    await chrome.storage.local.set({
+      planBeforeActMode: mode,
+      planBeforeAct: mode !== 'off',
+    }).catch(() => {});
+  });
+}
+
+if (planReviewModeSelect) {
+  planReviewModeSelect.addEventListener('change', async () => {
+    const mode = PLAN_REVIEW_MODES.has(planReviewModeSelect.value) ? planReviewModeSelect.value : 'confidence';
+    updatePlanReviewConfidenceUI();
+    await chrome.storage.local.set({ planReviewMode: mode }).catch(() => {});
+  });
+}
+
+if (planReviewConfidenceRange) {
+  planReviewConfidenceRange.addEventListener('input', updatePlanReviewConfidenceUI);
+  planReviewConfidenceRange.addEventListener('change', async () => {
+    const threshold = normalizePlanReviewConfidenceThreshold({
+      planReviewConfidenceThreshold: planReviewConfidenceRange.value,
+    });
+    planReviewConfidenceRange.value = threshold;
+    updatePlanReviewConfidenceUI();
+    await chrome.storage.local.set({ planReviewConfidenceThreshold: threshold }).catch(() => {});
+  });
+}
+
+notifySoundToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ notifySound: notifySoundToggle.checked }).catch(() => {});
+});
+
+completionConfettiToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ completionConfetti: completionConfettiToggle.checked }).catch(() => {});
+});
+
+completionFlashTabToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ completionFlashTab: completionFlashTabToggle.checked }).catch(() => {});
+});
+
+// Record traces is one switch for both trace tiers: on records every run with
+// its full request details (losslessTrace), off records neither.
+tracingToggle?.addEventListener('change', async () => {
+  const enabled = tracingToggle.checked;
+  await chrome.storage.local.set({ tracingEnabled: enabled, losslessTrace: enabled }).catch(() => {});
+});
+
+feedbackDiagnosticsToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ feedbackDiagnosticsEnabled: feedbackDiagnosticsToggle.checked });
+  if (!feedbackDiagnosticsToggle.checked) {
+    const response = await chrome.runtime.sendMessage({ target: 'background', action: 'feedback_clear_diagnostics' });
+    if (!response?.ok) console.error('[feedback] Could not clear local diagnostics:', response?.error);
+  }
+});
+
+costSessionLimitInput?.addEventListener('change', async () => {
+  const value = normalizeCostAmount(costSessionLimitInput.value);
+  costSessionLimitInput.value = value.toFixed(2);
+  await chrome.storage.local.set({ costAllowanceSessionUsd: value }).catch(() => {});
+});
+
+costTotalLimitInput?.addEventListener('change', async () => {
+  const value = normalizeCostAmount(costTotalLimitInput.value);
+  costTotalLimitInput.value = value.toFixed(2);
+  const stored = await chrome.storage.local.get(['meteredProviderCostSpentUsd']);
+  renderCostAllowanceSpent(normalizeCostAmount(stored.meteredProviderCostSpentUsd, 0), value);
+  await chrome.storage.local.set({ costAllowanceTotalUsd: value }).catch(() => {});
+});
+
+btnResetCostSpend?.addEventListener('click', async () => {
+  await chrome.storage.local.set({ meteredProviderCostSpentUsd: 0 });
+  renderCostAllowanceSpent(0, normalizeCostAmount(costTotalLimitInput?.value));
+});
+
+if (strictSecretToggle) {
+  strictSecretToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ strictSecretMode: strictSecretToggle.checked }).catch(() => {});
+    void syncDecisionStatus();
+  });
+}
+
+strictGuardsToggle?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ strictGuards: strictGuardsToggle.checked }).catch(() => {});
+});
+
+leanModeSelect?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ leanMode: normalizeLeanModeSetting(leanModeSelect.value) }).catch(() => {});
+});
+
+visionModeSelect?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ visionMode: normalizeVisionModeSetting(visionModeSelect.value) }).catch(() => {});
+});
+
+visionQualitySelect?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ visionQuality: normalizeVisionQuality(visionQualitySelect.value) }).catch(() => {});
+});
+
+if (allowLocalNetworkToggle) {
+  allowLocalNetworkToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ agentAllowLocalNetwork: allowLocalNetworkToggle.checked }).catch(() => {});
+  });
+}
+
+if (scheduledTasksToggle) {
+  scheduledTasksToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ scheduledTasksEnabled: scheduledTasksToggle.checked }).catch(() => {});
+  });
+}
+
+if (scheduledConfirmToggle) {
+  scheduledConfirmToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ scheduledRequireConsequentialConfirmation: scheduledConfirmToggle.checked }).catch(() => {});
+  });
+}
+
+function updateSystemOneThresholdLabels() {
+  if (systemOneWatchThresholdValue && systemOneWatchThresholdRange) {
+    systemOneWatchThresholdValue.textContent = `${systemOneWatchThresholdRange.value}%`;
+  }
+  if (systemOneCompletionThresholdValue && systemOneCompletionThresholdRange) {
+    systemOneCompletionThresholdValue.textContent = `${systemOneCompletionThresholdRange.value}%`;
+  }
+}
+
+systemOneWatchThresholdRange?.addEventListener('input', updateSystemOneThresholdLabels);
+systemOneCompletionThresholdRange?.addEventListener('input', updateSystemOneThresholdLabels);
+
+function showSystemOneResult(className, text) {
+  if (!systemOneTestResult) return;
+  systemOneTestResult.className = `test-result show${className ? ` ${className}` : ''}`;
+  systemOneTestResult.textContent = text;
+  if (className) setTimeout(() => systemOneTestResult.classList.remove('show'), 3000);
+}
+
+if (btnSaveSystemOne) {
+  btnSaveSystemOne.addEventListener('click', async () => {
+    const key = normalizeTypesafeApiKey(systemOneApiKeyInput?.value);
+    const mode = selectedDecisionMode();
+    const on = mode === 'on';
+    if (on && !LOCAL_DECISION_PROVIDERS.includes(decisionProviderInput.value) && !isValidTypesafeApiKey(key)) {
+      showSystemOneResult('fail', t('st.system_one.need_key'));
+      return;
+    }
+    if (decisionProviderInput.value === 'webgpu_d1' && on) {
+      const consentResult = await sendToBackground('d1_control', { command: 'consent', consent: document.getElementById('d1-consent').checked, consentVersion: 1 });
+      if (!consentResult.success) { showSystemOneResult('fail', consentResult.error); return; }
+    }
+    if (systemOneApiKeyInput) systemOneApiKeyInput.value = key;
+    let selection;
+    try { selection = decisionSettingsDraft(); resolveDecisionConfig({ ...selection, [DECISION_MODE_KEY]: 'on' }); if (!(selection.systemOneDoneThreshold >= .5 && selection.systemOneDoneThreshold <= .99)) throw new Error('Completion threshold must be 50–99%.'); } catch (error) { showSystemOneResult('fail', error.message); return; }
+    await chrome.storage.local.set({
+      ...selection,
+      ...(['webgpu_d1', 'webgpu_chat'].includes(decisionProviderInput.value) ? {} : decisionProviderInput.value === 'typesafe' ? { typesafeApiKey: key } : { [decisionProviderInput.value === 'local' ? 'decisionLocalApiKey' : 'decisionApiKey']: key }),
+      // Kept for builds from before modes, which read only this switch.
+      systemOneEnabled: on && (LOCAL_DECISION_PROVIDERS.includes(decisionProviderInput.value) || isValidTypesafeApiKey(key)),
+      systemOneWatchEnabled: systemOneWatchToggle?.checked === true,
+      systemOneCompletionEnabled: systemOneCompletionToggle?.checked === true,
+      systemOneFastClassifications: systemOneClassificationsToggle?.checked === true,
+      systemOneFastBrowser: systemOneBrowserToggle?.checked === true,
+      systemOneWatchThreshold: normalizeSystemOneThreshold(Number(systemOneWatchThresholdRange?.value) / 100),
+      systemOneCompletionThreshold: normalizeSystemOneThreshold(Number(systemOneCompletionThresholdRange?.value) / 100),
+    });
+    if (!on || decisionProviderInput.value !== 'webgpu_d1') await sendToBackground('d1_control', { command: 'reset' }).catch(() => {});
+    showSystemOneResult('ok', t('st.providers.saved'));
+  });
+}
+
+// Reset returns to Auto with On's defaults and deletes the saved keys.
+if (btnClearSystemOne) {
+  btnClearSystemOne.addEventListener('click', async () => {
+    for (const toggle of [decisionDoneToggle, systemOneWatchToggle, systemOneCompletionToggle, systemOneClassificationsToggle, systemOneBrowserToggle]) {
+      if (toggle) toggle.checked = true;
+    }
+    if (systemOneApiKeyInput) systemOneApiKeyInput.value = '';
+    decisionKeyDrafts.clear();
+    decisionProviderInput.value = previousDecisionProvider = 'openrouter';
+    decisionModelInput.value = DEFAULT_DECISION_MODEL;
+    decisionThresholdInput.value = '90';
+    decisionVisionSupported = false;
+    document.getElementById('decision-endpoint-field').hidden = true;
+    setDecisionMode('auto');
+    await chrome.storage.local.remove([
+      ...DECISION_SETTINGS_KEYS,
+      'typesafeApiKey',
+      'systemOneEnabled',
+      'systemOneWatchEnabled',
+      'systemOneCompletionEnabled', 'systemOneFastClassifications', 'systemOneFastBrowser',
+      'systemOneWatchThreshold',
+      'systemOneCompletionThreshold',
+    ]);
+    if (systemOneWatchThresholdRange) systemOneWatchThresholdRange.value = '70';
+    if (systemOneCompletionThresholdRange) systemOneCompletionThresholdRange.value = '70';
+    updateSystemOneThresholdLabels();
+    await sendToBackground('d1_control', { command: 'reset' }).catch(() => {});
+    await refreshD1Settings();
+    syncWebgpuDecisionProvider();
+    // D1's provider switch unchecks Verify completion; Reset restores On's default.
+    decisionDoneToggle.checked = true;
+    await syncDecisionStatus();
+    showSystemOneResult('ok', t('st.decision.reset_done'));
+  });
+}
+
+function decisionSettingsDraft() {
+  const card = decisionModels.find(m => m.id === decisionModelInput.value);
+  return { [DECISION_MODE_KEY]: selectedDecisionMode(), decisionProvider: decisionProviderInput.value, decisionModel: decisionModelInput.value.trim(),
+    decisionBaseUrl: decisionEndpointInput.value.trim(), decisionVisionMode: decisionVisionInput.value,
+    decisionVisionSupported, ...(['webgpu_d1', 'webgpu_chat'].includes(decisionProviderInput.value) ? {} : decisionProviderInput.value === 'typesafe' ? { typesafeApiKey: systemOneApiKeyInput.value.trim() } : { [decisionProviderInput.value === 'local' ? 'decisionLocalApiKey' : 'decisionApiKey']: systemOneApiKeyInput.value.trim() }),
+    systemOneDoneEnabled: decisionDoneToggle.checked, systemOneDoneThreshold: Number(decisionThresholdInput.value) / 100,
+    decisionInputRate: card?.inputRate ?? (decisionProviderInput.value === 'typesafe' ? .042 : LOCAL_DECISION_PROVIDERS.includes(decisionProviderInput.value) ? 0 : .02), decisionOutputRate: card?.outputRate ?? 0 };
+}
+
+decisionProviderInput?.addEventListener('change', () => {
+  decisionKeyDrafts.set(previousDecisionProvider, systemOneApiKeyInput.value);
+  previousDecisionProvider = decisionProviderInput.value;
+  systemOneApiKeyInput.value = decisionKeyDrafts.get(previousDecisionProvider) || '';
+  decisionModelInput.value = previousDecisionProvider === 'webgpu_d1' ? D1_MODEL_ID : previousDecisionProvider === 'webgpu_chat' ? WEBGPU_CHAT_DECISION_MODEL : previousDecisionProvider === 'typesafe' ? 'jev-1.13.0' : previousDecisionProvider === 'local' ? 'kev-latest' : DEFAULT_DECISION_MODEL;
+  decisionModels = []; decisionVisionSupported = false;
+  document.getElementById('decision-models').replaceChildren();
+  document.getElementById('decision-endpoint-field').hidden = previousDecisionProvider !== 'local';
+  syncWebgpuDecisionProvider();
+  void syncDecisionStatus();
+});
+decisionModelInput?.addEventListener('input', () => {
+  decisionVisionSupported = decisionModels.find(m => m.id === decisionModelInput.value)?.supportsVision === true;
+});
+document.getElementById('btn-decision-models')?.addEventListener('click', async () => {
+  const button = document.getElementById('btn-decision-models'); button.disabled = true;
+  try {
+    const result = await sendToBackground('list_decision_models', { settings: decisionSettingsDraft() });
+    if (!result.success) throw new Error(result.error || 'Model discovery unavailable');
+    decisionModels = result.models;
+    const list = document.getElementById('decision-models'); list.replaceChildren();
+    for (const model of decisionModels) { const option = document.createElement('option'); option.value = model.id; option.label = model.name; list.append(option); }
+    decisionVisionSupported = decisionModels.find(m => m.id === decisionModelInput.value)?.supportsVision === true;
+    showSystemOneResult('ok', t('st.decision.models_loaded', { count: decisionModels.length }));
+  } catch (error) { showSystemOneResult('fail', error.message); } finally { button.disabled = false; }
+});
+
+btnTestSystemOne?.addEventListener('click', async () => {
+  const apiKey = normalizeTypesafeApiKey(systemOneApiKeyInput?.value);
+  // Auto tests the model it uses now; only On needs a key for a cloud provider.
+  if (selectedDecisionMode() === 'on' && !apiKey && !LOCAL_DECISION_PROVIDERS.includes(decisionProviderInput.value)) { showSystemOneResult('fail', t('st.system_one.need_key')); return; }
+  btnTestSystemOne.disabled = true;
+  showSystemOneResult('', t('st.providers.testing'));
+  try {
+    const result = await sendToBackground('test_system_one', { apiKey, settings: decisionSettingsDraft() });
+    if (result?.visionTested || result?.visionVerified) decisionVisionSupported = result.visionVerified === true;
+    showSystemOneResult(result?.success ? 'ok' : 'fail', result?.success
+      ? t('st.providers.connected', { model: result.model }) + (result.visionTested && !result.visionVerified ? ' ' + t('st.decision.vision_unverified') : '')
+      : t('st.providers.failed', { error: result?.error || 'Jev unavailable' }));
+  } catch (error) {
+    showSystemOneResult('fail', t('st.providers.failed', { error: error.message }));
+  } finally { btnTestSystemOne.disabled = false; }
+});
+
+// --- Vision Model ---
+
+const WEBGPU_VISION_LOCAL_CHOICES = new Set([WEBGPU_VISION_CHOICE_COMPASS_VLD, WEBGPU_VISION_CHOICE_BONSAI, WEBGPU_VISION_CHOICE_WEBBRAIN_VL]);
+
+// An explicitly chosen in-browser model takes the place of the endpoint form;
+// Auto and Off leave the endpoint editable.
+function isWebgpuVisionEnabled() {
+  return WEBGPU_VISION_LOCAL_CHOICES.has(webgpuVisionChoice);
+}
+
+// The chat preset that reads screenshots for the current choice: Ternary
+// Bonsai 2 2B Vision for its own choice, and for Auto when only it is
+// downloaded (resolveWebgpuVisionChoice); otherwise Compass VLD Tiny v5.
+function chatVisionModelId() {
+  if (webgpuVisionChoice === WEBGPU_VISION_CHOICE_BONSAI) return WEBGPU_VISION_BONSAI_MODEL_ID;
+  if (webgpuVisionChoice === WEBGPU_VISION_CHOICE_AUTO && !webgpuVisionLocal.compassVldReady && webgpuVisionLocal.bonsaiReady) {
+    return WEBGPU_VISION_BONSAI_MODEL_ID;
+  }
+  return WEBGPU_VISION_COMPASS_VLD_MODEL_ID;
+}
+
+function chatVisionReady() {
+  return chatVisionModelId() === WEBGPU_VISION_BONSAI_MODEL_ID ? webgpuVisionLocal.bonsaiReady : webgpuVisionLocal.compassVldReady;
+}
+
+function chatVisionDownloadState() {
+  const state = webgpuVisionLocal.chatDownload;
+  if (!state) return null;
+  const modelId = chatVisionModelId();
+  const sameModel = model => String(model || '').trim() === modelId;
+  if (sameModel(state.modelId)) return state;
+  // A transfer started elsewhere shows up as the active transfer.
+  return state.activeTransfer && sameModel(state.activeTransfer.modelId) ? state.activeTransfer : state;
+}
+
+function webgpuVisionLocalView() {
+  const choice = webgpuVisionChoice;
+  if (choice === WEBGPU_VISION_CHOICE_OFF) {
+    return { kind: '', status: t('st.vision.local.status.off'), action: '' };
+  }
+  if (choice === WEBGPU_VISION_CHOICE_WEBBRAIN_VL) {
+    const readiness = webgpuVisionLocal.readiness || {};
+    if (!readiness.consented || !readiness.enabled) {
+      return { kind: '', status: t('st.vision.local.status.needs_consent'), action: 'enable' };
+    }
+    const progress = Math.round(Number(readiness.progress) || 0);
+    switch (readiness.status) {
+      case 'ready':
+        return { kind: 'ready', status: t('st.vision.local.status.ready', { model: 'WebBrain VL 2 450M' }), action: '' };
+      case 'queued':
+      case 'loading':
+        return { kind: '', status: t('st.vision.local.status.preparing'), action: '', busy: true };
+      case 'downloading':
+        return { kind: '', status: t('st.providers.webgpu_download.downloading', { progress }), action: '', busy: true };
+      case 'paused':
+        return { kind: '', status: t('st.providers.webgpu_download.paused', { progress }), action: 'resume' };
+      case 'error':
+        return { kind: 'error', status: `${t('st.providers.webgpu_download.error')}: ${readiness.error || t('st.providers.webgpu_download.error_detail')}`, action: 'start' };
+      default:
+        return { kind: '', status: t('st.vision.local.status.not_downloaded'), action: 'start' };
+    }
+  }
+  // Auto and the chat presets that read images.
+  const model = webgpuModelDisplayName(chatVisionModelId());
+  if (chatVisionReady()) {
+    return { kind: 'ready', status: t('st.vision.local.status.ready', { model }), action: '' };
+  }
+  const download = chatVisionDownloadState();
+  if (download && ['downloading', 'checking'].includes(download.status)) {
+    return {
+      kind: '',
+      status: t('st.vision.local.status.chat_downloading', { model, progress: Math.round(Number(download.progress) || 0) }),
+      action: 'stop-chat-model',
+      busy: true,
+    };
+  }
+  if (download?.status === 'paused') {
+    return { kind: '', status: t('st.providers.webgpu_download.paused', { progress: Math.round(Number(download.progress) || 0) }), action: 'chat-model' };
+  }
+  if (download?.status === 'error') {
+    return { kind: 'error', status: `${t('st.providers.webgpu_download.error')}: ${download.error || t('st.providers.webgpu_download.error_detail')}`, action: 'chat-model' };
+  }
+  return {
+    kind: '',
+    status: t(choice === WEBGPU_VISION_CHOICE_AUTO ? 'st.vision.local.status.auto_off' : 'st.vision.local.status.not_downloaded'),
+    action: 'chat-model',
+  };
+}
+
+const WEBGPU_VISION_ACTION_LABELS = {
+  enable: 'st.vision.local.download_webbrain_vl',
+  start: 'st.vision.local.download_webbrain_vl',
+  resume: 'st.providers.webgpu_download.resume',
+  'chat-model': 'st.vision.local.download_chat_model',
+  'stop-chat-model': 'st.providers.webgpu_download.stop',
+};
+
+function renderLocalVision() {
+  if (webgpuVisionChoiceSelect) webgpuVisionChoiceSelect.value = webgpuVisionChoice;
+  const view = webgpuVisionLocalView();
+  const active = isWebgpuVisionEnabled()
+    || (webgpuVisionChoice === WEBGPU_VISION_CHOICE_AUTO && (webgpuVisionLocal.compassVldReady || webgpuVisionLocal.bonsaiReady));
+  webgpuVisionOption?.classList.toggle('enabled', active);
+  if (webgpuVisionStatus) {
+    webgpuVisionStatus.textContent = view.status;
+    webgpuVisionStatus.dataset.kind = view.kind;
+  }
+  if (btnUseWebgpuVision) {
+    const key = WEBGPU_VISION_ACTION_LABELS[view.action];
+    btnUseWebgpuVision.hidden = !key;
+    btnUseWebgpuVision.dataset.action = view.action || '';
+    if (key) {
+      const params = view.action === 'chat-model' ? { model: webgpuModelDisplayName(chatVisionModelId()) } : null;
+      btnUseWebgpuVision.dataset.i18n = key;
+      if (params) btnUseWebgpuVision.dataset.i18nParams = JSON.stringify(params);
+      else delete btnUseWebgpuVision.dataset.i18nParams;
+      btnUseWebgpuVision.textContent = params ? t(key, params) : t(key);
+    }
+  }
+  if (visionEndpointFields) visionEndpointFields.disabled = isWebgpuVisionEnabled();
+  if (view.busy && !webgpuVisionPollTimer) {
+    webgpuVisionPollTimer = setInterval(scheduleLocalVisionRefresh, 2000);
+  } else if (!view.busy && webgpuVisionPollTimer) {
+    clearInterval(webgpuVisionPollTimer);
+    webgpuVisionPollTimer = null;
+  }
+}
+
+function renderVisionConfig(config = {}) {
+  currentVisionConfig = config && typeof config === 'object' && config.type !== 'webgpu'
+    ? config
+    : {};
+  visionBaseUrlInput.value = currentVisionConfig.baseUrl || '';
+  visionApiKeyInput.value = currentVisionConfig.apiKey || '';
+  visionModelInput.value = currentVisionConfig.model || '';
+  renderLocalVision();
+  updateMultimodalDetectedProvider('vision');
+}
+
+async function saveVisionConfig(config) {
+  if (config && Object.keys(config).length) {
+    await chrome.storage.local.set({ visionModel: config });
+    renderVisionConfig(config);
+    return;
+  }
+  await chrome.storage.local.remove('visionModel');
+  renderVisionConfig({});
+}
+
+let localVisionRefresh = null;
+let localVisionRefreshAgain = false;
+function scheduleLocalVisionRefresh() {
+  if (localVisionRefresh) {
+    localVisionRefreshAgain = true;
+    return;
+  }
+  localVisionRefresh = refreshLocalVision().catch(() => {}).finally(() => {
+    localVisionRefresh = null;
+    if (localVisionRefreshAgain) {
+      localVisionRefreshAgain = false;
+      scheduleLocalVisionRefresh();
+    }
+  });
+}
+
+/** Reread the choice and the readiness of the model it points at. */
+async function refreshLocalVision() {
+  const result = await sendToBackground('get_webgpu_vision_choice').catch(() => null);
+  if (result?.ok) {
+    webgpuVisionChoice = WEBGPU_VISION_CHOICES.includes(result.choice) ? result.choice : WEBGPU_VISION_CHOICE_AUTO;
+    webgpuVisionLocal = {
+      ...webgpuVisionLocal,
+      model: result.model || null,
+      compassVldReady: result.compassVldReady === true,
+      bonsaiReady: result.bonsaiReady === true,
+      readiness: result.readiness || null,
+    };
+  }
+  // Only a chat-model choice that is not ready needs the transfer status;
+  // asking for it starts the offscreen document, so a ready or other choice
+  // skips it.
+  const chatChoice = [WEBGPU_VISION_CHOICE_AUTO, WEBGPU_VISION_CHOICE_COMPASS_VLD, WEBGPU_VISION_CHOICE_BONSAI].includes(webgpuVisionChoice);
+  if (chatChoice && !chatVisionReady()) {
+    const modelId = chatVisionModelId();
+    const snapshot = await sendToBackground('get_webgpu_download_status', { model: modelId }).catch(() => null);
+    webgpuVisionLocal.chatDownload = snapshot ? normalizeWebgpuDownloadSnapshot(snapshot) : null;
+    if (webgpuVisionLocal.chatDownload?.ready) {
+      if (modelId === WEBGPU_VISION_BONSAI_MODEL_ID) webgpuVisionLocal.bonsaiReady = true;
+      else webgpuVisionLocal.compassVldReady = true;
+    }
+  } else {
+    webgpuVisionLocal.chatDownload = null;
+  }
+  renderLocalVision();
+}
+
+async function loadVisionConfig() {
+  if (!visionBaseUrlInput) return;
+  const stored = await chrome.storage.local.get([
+    'visionModel',
+    WEBGPU_VISION_ENABLED_KEY,
+    WEBGPU_VISION_CONSENT_VERSION_KEY,
+    WEBGPU_VISION_AUTO_SELECTED_KEY,
+  ]);
+  let vision = stored.visionModel || {};
+  if (vision?.type === 'webgpu') {
+    // Early PR builds stored the Chromium-only choice in the portable endpoint
+    // slot. Migrate that shape once so it cannot sync to Firefox again.
+    vision = {};
+    await chrome.storage.local.set({
+      [WEBGPU_VISION_ENABLED_KEY]: true,
+      [WEBGPU_VISION_CONSENT_VERSION_KEY]: WEBGPU_VISION_CONSENT_VERSION,
+    });
+    await chrome.storage.local.remove('visionModel');
+  } else if (stored[WEBGPU_VISION_ENABLED_KEY] === true
+      && stored[WEBGPU_VISION_CONSENT_VERSION_KEY] !== WEBGPU_VISION_CONSENT_VERSION) {
+    // Older Apocalypse builds could enable this without a dedicated Settings
+    // action. Require one explicit re-enable while retaining cached weights.
+    await chrome.storage.local.remove([WEBGPU_VISION_ENABLED_KEY, WEBGPU_VISION_AUTO_SELECTED_KEY]);
+  }
+  renderVisionConfig(vision);
+  await refreshLocalVision();
+}
+
+async function setWebgpuVisionChoice(choice) {
+  const result = await sendToBackground('set_webgpu_vision_choice', { choice });
+  if (!result?.ok) throw new Error(result?.error || 'The in-browser vision model could not be changed.');
+  await refreshLocalVision();
+}
+
+async function runWebgpuVisionAction(action) {
+  if (action === 'enable') {
+    // First download of WebBrain VL 2 450M: checks WebGPU, records consent,
+    // and starts the transfer from this explicit click.
+    const result = await sendToBackground('enable_webgpu_vision');
+    if (!result?.ok) throw new Error(result?.error || 'The local vision model download could not be started.');
+  } else if (action === 'start' || action === 'resume') {
+    const result = await sendToBackground('start_webgpu_vision_download');
+    if (result?.ok === false) throw new Error(result.error || 'The local vision model download could not be started.');
+  } else if (action === 'chat-model') {
+    await sendToBackground('start_webgpu_download', { model: chatVisionModelId() });
+  } else if (action === 'stop-chat-model') {
+    await sendToBackground('stop_webgpu_download', { model: chatVisionModelId() });
+  }
+  await refreshLocalVision();
+}
+
+function updateMultimodalDetectedProvider(kind) {
+  const baseInput = kind === 'vision' ? visionBaseUrlInput : transcriptionBaseUrlInput;
+  const hint = document.getElementById(`${kind}-detected`);
+  const icon = document.getElementById(`${kind}-detected-icon`);
+  const label = document.getElementById(`${kind}-detected-label`);
+  if (!baseInput || !hint || !icon || !label) return;
+  const id = sniffProviderIdFromBaseUrl(baseInput.value);
+  const src = providerIconUrl(id);
+  if (!id || !src) {
+    hint.hidden = true;
+    icon.removeAttribute('src');
+    label.textContent = '';
+    return;
+  }
+  icon.src = src;
+  label.textContent = PROVIDER_SHORT_LABELS[id] || id;
+  hint.hidden = false;
+}
+
+function showVisionResult(className, text, color = '') {
+  visionTestResult.className = `test-result show${className ? ` ${className}` : ''}`;
+  visionTestResult.textContent = text;
+  visionTestResult.style.color = color || '';
+  return visionTestResult;
+}
+
+function flashVisionResult(className, text) {
+  const resultEl = showVisionResult(className, text);
+  setTimeout(() => resultEl.classList.remove('show'), 2000);
+}
+
+webgpuVisionChoiceSelect?.addEventListener('change', async () => {
+  const choice = webgpuVisionChoiceSelect.value;
+  try {
+    await setWebgpuVisionChoice(choice);
+    flashVisionResult('ok', t('st.vision.saved'));
+  } catch (error) {
+    showVisionResult('error', error?.message || String(error));
+    await refreshLocalVision().catch(() => {});
+  }
+});
+
+btnUseWebgpuVision?.addEventListener('click', async () => {
+  const action = btnUseWebgpuVision.dataset.action || '';
+  if (!action) return;
+  btnUseWebgpuVision.disabled = true;
+  try {
+    if (action !== 'stop-chat-model') showVisionResult('', t('st.providers.webgpu_download.start'));
+    await runWebgpuVisionAction(action);
+    if (action === 'stop-chat-model') flashVisionResult('ok', t('st.vision.cleared'));
+    else visionTestResult.classList.remove('show');
+  } catch (error) {
+    showVisionResult('error', error?.message || String(error));
+  } finally {
+    btnUseWebgpuVision.disabled = false;
+  }
+});
+
+btnSaveVision?.addEventListener('click', async () => {
+  const baseUrl = normalizeOpenAICompatibleBaseUrl(visionBaseUrlInput.value);
+  const apiKey = visionApiKeyInput.value.trim();
+  const model = visionModelInput.value.trim();
+
+  if (!baseUrl && !apiKey && !model) {
+    await saveVisionConfig(null);
+    flashVisionResult('ok', t('st.vision.cleared'));
+    return;
+  }
+
+  await saveVisionConfig({ type: 'openai', baseUrl, apiKey, model });
+  flashVisionResult('ok', t('st.vision.saved'));
+});
+
+btnTestVision?.addEventListener('click', async () => {
+  const baseUrl = normalizeOpenAICompatibleBaseUrl(visionBaseUrlInput.value);
+  const apiKey = visionApiKeyInput.value.trim();
+  const model = visionModelInput.value.trim();
+  // An empty endpoint form under Auto tests the in-browser model Auto resolved to.
+  const isWebgpu = isWebgpuVisionEnabled() || (!baseUrl && !model && !!webgpuVisionLocal.model);
+
+  if (!isWebgpu && (!baseUrl || !model)) {
+    const resultEl = showVisionResult('fail', t('st.vision.fill_required'));
+    setTimeout(() => resultEl.classList.remove('show'), 2500);
+    return;
+  }
+
+  if (!isWebgpu) {
+    await saveVisionConfig({ type: 'openai', baseUrl, apiKey, model });
+  }
+
+  showVisionResult('', t('st.vision.testing'), 'var(--text2)');
+  if (isWebgpu) visionTestResult.textContent = t('st.vision.local.testing');
+
+  try {
+    const res = await sendToBackground('test_vision_provider');
+    if (res?.ok) {
+      showVisionResult('ok', t('st.vision.connected', { model: res.model || model }));
+    } else {
+      showVisionResult('fail', t('st.vision.failed', { error: res?.error || 'Unknown error' }));
+    }
+  } catch (e) {
+    showVisionResult('fail', t('st.vision.failed', { error: e.message }));
+  }
+});
+
+btnClearVision?.addEventListener('click', async () => {
+  if (isWebgpuVisionEnabled()) {
+    // Back to Auto; downloaded files stay cached.
+    await setWebgpuVisionChoice(WEBGPU_VISION_CHOICE_AUTO);
+    flashVisionResult('ok', t('st.vision.cleared'));
+    return;
+  }
+  await saveVisionConfig(null);
+  flashVisionResult('ok', t('st.vision.cleared'));
+});
+
+visionBaseUrlInput?.addEventListener('input', () => updateMultimodalDetectedProvider('vision'));
+
+// --- Transcription Service (Whisper-compatible) ---
+//
+// Same UX as the vision override. Stored in chrome.storage.local under
+// `transcriptionModel = { baseUrl, apiKey, model }`. Consumed by
+// transcribe.js, which uses the override when all three fields are
+// filled, and falls back to the auto-pick-from-providers behavior when
+// any field is empty.
+
+function showTranscriptionResult(className, text, color = '') {
+  if (!transcriptionTestResult) return;
+  transcriptionTestResult.className = `test-result show${className ? ` ${className}` : ''}`;
+  transcriptionTestResult.textContent = text;
+  transcriptionTestResult.style.color = color || '';
+  return transcriptionTestResult;
+}
+
+function flashTranscriptionResult(className, text) {
+  const resultEl = showTranscriptionResult(className, text);
+  if (resultEl) setTimeout(() => resultEl.classList.remove('show'), 2000);
+}
+
+if (btnSaveTranscription) {
+  btnSaveTranscription.addEventListener('click', async () => {
+    const baseUrl = normalizeOpenAICompatibleBaseUrl(transcriptionBaseUrlInput.value);
+    const apiKey = transcriptionApiKeyInput.value.trim();
+    const model = transcriptionModelInput.value.trim();
+
+    if (!baseUrl && !apiKey && !model) {
+      await chrome.storage.local.remove('transcriptionModel');
+      flashTranscriptionResult('ok', t('st.transcription.cleared'));
+      return;
+    }
+
+    await chrome.storage.local.set({
+      transcriptionModel: { baseUrl, apiKey, model },
+    });
+    transcriptionBaseUrlInput.value = baseUrl;
+    flashTranscriptionResult('ok', t('st.transcription.saved'));
+  });
+}
+
+if (btnTestTranscription) {
+  btnTestTranscription.addEventListener('click', async () => {
+    const baseUrl = normalizeOpenAICompatibleBaseUrl(transcriptionBaseUrlInput.value);
+    const apiKey = transcriptionApiKeyInput.value.trim();
+    const model = transcriptionModelInput.value.trim();
+
+    if (!baseUrl || !model) {
+      const resultEl = showTranscriptionResult('fail', t('st.transcription.fill_required'));
+      if (resultEl) setTimeout(() => resultEl.classList.remove('show'), 2500);
+      return;
+    }
+
+    // Persist before testing so the background handler sees the values.
+    await chrome.storage.local.set({
+      transcriptionModel: { baseUrl, apiKey, model },
+    });
+    transcriptionBaseUrlInput.value = baseUrl;
+
+    showTranscriptionResult('', t('st.transcription.testing'), 'var(--text2)');
+
+    try {
+      const res = await sendToBackground('test_transcription_provider');
+      if (res?.ok) {
+        showTranscriptionResult('ok', t('st.transcription.connected', { model: res.model || model }));
+      } else {
+        showTranscriptionResult('fail', t('st.transcription.failed', { error: res?.error || 'Unknown error' }));
+      }
+    } catch (e) {
+      showTranscriptionResult('fail', t('st.transcription.failed', { error: e.message }));
+    }
+  });
+}
+
+if (btnClearTranscription) {
+  btnClearTranscription.addEventListener('click', async () => {
+    transcriptionBaseUrlInput.value = '';
+    transcriptionApiKeyInput.value = '';
+    transcriptionModelInput.value = '';
+    updateMultimodalDetectedProvider('transcription');
+    await chrome.storage.local.remove('transcriptionModel');
+    flashTranscriptionResult('ok', t('st.transcription.cleared'));
+  });
+}
+
+transcriptionBaseUrlInput?.addEventListener('input', () => updateMultimodalDetectedProvider('transcription'));
+
+// --- Generative Media ---
+const imageGenDrafts = new Map();
+let imageGenCurrentProvider = 'fal';
+
+function showImageGenResult(className, text, color = '') {
+  if (!imageGenTestResult) return;
+  imageGenTestResult.className = `test-result show${className ? ` ${className}` : ''}`;
+  imageGenTestResult.textContent = text;
+  imageGenTestResult.style.color = color || '';
+  return imageGenTestResult;
+}
+
+function flashImageGenResult(className, text) {
+  const resultEl = showImageGenResult(className, text);
+  if (resultEl) setTimeout(() => resultEl.classList.remove('show'), 2000);
+}
+
+// An empty model field means the provider's default, shown as its placeholder.
+function readImageGenForm() {
+  const provider = imageGenProviderInput?.value || 'fal';
+  if (provider === 'comfyui') {
+    return {
+      provider,
+      baseUrl: imageGenBaseUrlInput.value.trim() || MEDIA_PROVIDERS.comfyui.baseUrl,
+      workflow: imageGenWorkflowInput.value.trim(),
+      videoWorkflow: imageGenVideoWorkflowInput?.value.trim() || '',
+    };
+  }
+  const config = {
+    provider,
+    apiKey: imageGenApiKeyInput.value.trim(),
+    model: imageGenModelInput.value.trim(),
+    videoModel: imageGenVideoModelInput?.value.trim() || '',
+  };
+  if (provider === 'comfyrouter') {
+    config.parameters = imageGenParametersInput.value.trim() || '{}';
+    config.videoParameters = imageGenVideoParametersInput?.value.trim() || '{}';
+  }
+  return config;
+}
+
+function updateImageGenProvider() {
+  const provider = imageGenProviderInput?.value || 'fal';
+  const meta = MEDIA_PROVIDERS[provider] || MEDIA_PROVIDERS.fal;
+  const local = provider === 'comfyui';
+  for (const [id, hidden] of [
+    ['image-gen-key-field', local], ['image-gen-model-field', local], ['image-gen-video-model-field', local],
+    ['image-gen-url-field', !local], ['image-gen-workflow-field', !local], ['image-gen-video-workflow-field', !local],
+    ['image-gen-parameters-field', provider !== 'comfyrouter'], ['image-gen-video-parameters-field', provider !== 'comfyrouter'],
+  ]) {
+    const field = document.getElementById(id); if (field) field.hidden = hidden;
+  }
+  if (imageGenApiKeyInput) imageGenApiKeyInput.placeholder = meta.keyPlaceholder || '';
+  if (imageGenModelInput) imageGenModelInput.placeholder = meta.model || '';
+  if (imageGenVideoModelInput) imageGenVideoModelInput.placeholder = meta.videoModel || '';
+  const hint = document.getElementById('image-gen-provider-hint');
+  if (hint) hint.textContent = t(`st.imagegen.hint.${provider}`) + ' ';
+  const docs = document.getElementById('image-gen-docs'); if (docs) docs.href = meta.docs;
+}
+
+function renderImageGenConfig(config) {
+  const provider = Object.hasOwn(MEDIA_PROVIDERS, mediaProvider(config)) ? mediaProvider(config) : 'fal';
+  imageGenCurrentProvider = provider;
+  if (imageGenProviderInput) imageGenProviderInput.value = provider;
+  if (imageGenApiKeyInput) imageGenApiKeyInput.value = config.apiKey || '';
+  if (imageGenModelInput) imageGenModelInput.value = config.model || '';
+  if (imageGenVideoModelInput) imageGenVideoModelInput.value = config.videoModel || '';
+  if (imageGenBaseUrlInput) imageGenBaseUrlInput.value = config.baseUrl || MEDIA_PROVIDERS.comfyui.baseUrl;
+  const jsonText = value => (typeof value === 'object' && value ? JSON.stringify(value, null, 2) : value || '');
+  if (imageGenWorkflowInput) imageGenWorkflowInput.value = jsonText(config.workflow);
+  if (imageGenVideoWorkflowInput) imageGenVideoWorkflowInput.value = jsonText(config.videoWorkflow);
+  if (imageGenParametersInput) imageGenParametersInput.value = jsonText(config.parameters);
+  if (imageGenVideoParametersInput) imageGenVideoParametersInput.value = jsonText(config.videoParameters);
+  updateImageGenProvider();
+}
+
+imageGenProviderInput?.addEventListener('change', () => {
+  const selected = imageGenProviderInput.value;
+  // Preserve unsaved drafts while switching, and never reuse another provider's key.
+  imageGenProviderInput.value = imageGenCurrentProvider;
+  imageGenDrafts.set(imageGenCurrentProvider, readImageGenForm());
+  renderImageGenConfig(imageGenDrafts.get(selected) || { provider: selected });
+  if (imageGenTestResult) imageGenTestResult.classList.remove('show');
+});
+document.addEventListener('wb-locale-changed', updateImageGenProvider);
+
+async function saveImageGenForm() {
+  const config = readImageGenForm();
+  validateMediaConfig(config);
+  await chrome.storage.local.set({ imageGenModel: config });
+  return config;
+}
+
+btnSaveImageGen?.addEventListener('click', async () => {
+  try { await saveImageGenForm(); flashImageGenResult('ok', t('st.imagegen.saved')); }
+  catch (error) { showImageGenResult('fail', t('st.imagegen.failed', { error: error.message })); }
+});
+
+btnTestImageGen?.addEventListener('click', async () => {
+  btnTestImageGen.disabled = true;
+  try {
+    const config = await saveImageGenForm();
+    showImageGenResult('', t('st.imagegen.testing'), 'var(--text2)');
+    const res = await sendToBackground('test_image_gen_provider');
+    if (res?.ok && res.imageModel) showImageGenResult('ok', t('st.imagegen.connected_models', { image: res.imageModel, video: res.videoModel }));
+    else if (res?.ok) showImageGenResult('ok', t('st.imagegen.connected', { model: res.model || config.model }));
+    else showImageGenResult('fail', t('st.imagegen.failed', { error: res?.error || 'Unknown error' }));
+  } catch (error) { showImageGenResult('fail', t('st.imagegen.failed', { error: error.message })); }
+  finally { btnTestImageGen.disabled = false; }
+});
+
+btnClearImageGen?.addEventListener('click', async () => {
+  const provider = imageGenProviderInput.value;
+  imageGenDrafts.clear();
+  renderImageGenConfig({ provider });
+  await chrome.storage.local.remove('imageGenModel');
+  flashImageGenResult('ok', t('st.imagegen.cleared'));
+});
+
+// --- Profile auto-fill ---
+let profileSyncChallenge = null;
+function showProfileSyncResult(ok, text) { if (!profileSyncResult) return; profileSyncResult.className = `test-result show ${ok ? 'ok' : 'fail'}`; profileSyncResult.textContent = text; }
+function setProfileSyncVisible(el, visible) { if (el) el.hidden = !visible; }
+function describeProfileSyncState(state) {
+  if (state.status === 'syncing') return t('st.sync.status.syncing');
+  if (state.status === 'offline') return t('st.sync.status.offline');
+  if (state.status === 'subscription') return t('st.sync.status.subscription');
+  if (state.status === 'error') return state.error || t('st.sync.status.error');
+  if (!state.authenticated) return t('st.sync.status.auth_required');
+  if (!state.enabled || state.status === 'empty') return t('st.sync.status.password_required');
+  if (state.unlocked) return t('st.sync.status.unlocked');
+  return t('st.sync.status.locked');
+}
+function renderProfileSyncState(state) {
+  const authenticated = !!state.authenticated;
+  const enabled = state.enabled === true && state.status !== 'empty';
+  const unlocked = !!state.unlocked;
+  setProfileSyncVisible(profileSyncEmailField, !authenticated);
+  setProfileSyncVisible(profileSyncPasswordField, authenticated && !unlocked);
+  setProfileSyncVisible(profileSyncConfirmField, authenticated && !enabled);
+  setProfileSyncVisible(btnProfileSyncAuth, !authenticated);
+  setProfileSyncVisible(btnProfileSyncEnable, authenticated && !enabled);
+  setProfileSyncVisible(btnProfileSyncUnlock, authenticated && enabled && !unlocked);
+  setProfileSyncVisible(btnProfileSyncNow, authenticated && enabled && unlocked);
+  setProfileSyncVisible(profileSyncAdvanced, authenticated && enabled && unlocked);
+  if (profileSyncPassword) profileSyncPassword.autocomplete = enabled ? 'current-password' : 'new-password';
+  if (profileSyncPasswordField?.hidden && profileSyncPassword) profileSyncPassword.value = '';
+  if (profileSyncConfirmField?.hidden && profileSyncConfirm) profileSyncConfirm.value = '';
+  if (profileSyncStatus) profileSyncStatus.textContent = describeProfileSyncState(state || {});
+}
+async function refreshProfileSyncState() { const state = await sendToBackground('profile_sync_state').catch(e => ({ status: 'error', error: e.message })); renderProfileSyncState(state); return state; }
+async function reloadProfileSyncData() {
+  const stored = await chrome.storage.local.get([
+    'profileEnabled',
+    'profileText',
+    'visionModel',
+    WEBGPU_VISION_ENABLED_KEY,
+    WEBGPU_VISION_CONSENT_VERSION_KEY,
+    'transcriptionModel',
+    'imageGenModel',
+  ]);
+  if (profileEnabledToggle) profileEnabledToggle.checked = !!stored.profileEnabled;
+  if (profileTextArea) profileTextArea.value = stored.profileText || '';
+  if (stored.visionModel?.type === 'webgpu') {
+    await loadVisionConfig();
+  } else if (visionBaseUrlInput) {
+    renderVisionConfig(stored.visionModel || {});
+  }
+  const transcription = stored.transcriptionModel || {};
+  if (transcriptionBaseUrlInput) transcriptionBaseUrlInput.value = transcription.baseUrl || '';
+  if (transcriptionApiKeyInput) transcriptionApiKeyInput.value = transcription.apiKey || '';
+  if (transcriptionModelInput) transcriptionModelInput.value = transcription.model || '';
+  updateMultimodalDetectedProvider('transcription');
+  renderImageGenConfig(stored.imageGenModel || {});
+  await loadUserMemorySettings();
+  if (!providersContainer) return;
+  const res = await sendToBackground('get_providers');
+  providersData = res.providers;
+  activeProviderId = res.active;
+  renderProviders();
+}
+// Profile sync runs from Settings, but what it pulls also fills the Providers
+// page. Settings pages open in other tabs reload what they show, so a Save
+// there cannot write stale values over the synced ones.
+const settingsPagesChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('webbrain-settings-pages') : null;
+settingsPagesChannel?.addEventListener('message', (event) => {
+  if (event.data?.type === 'profile-sync-data-changed') reloadProfileSyncData().catch(() => {});
+});
+function profileSyncButtonRestore(button, pendingLabel) {
+  if (!button) return () => {};
+  const previousDisabled = button.disabled;
+  const previousText = button.textContent;
+  button.disabled = true;
+  if (pendingLabel) button.textContent = pendingLabel;
+  return () => { button.disabled = previousDisabled; button.textContent = previousText; };
+}
+async function profileSyncAction(action, data = {}, options = {}) {
+  const restoreButton = profileSyncButtonRestore(options.button, options.pendingLabel);
+  try {
+    if (options.pending) showProfileSyncResult(true, options.pending);
+    const result = await sendToBackground(action, data);
+    if (['profile_sync_unlock', 'profile_sync_now', 'profile_sync_reset'].includes(action)) {
+      settingsPagesChannel?.postMessage({ type: 'profile-sync-data-changed' });
+      await reloadProfileSyncData();
+    }
+    showProfileSyncResult(true, options.success || t('st.sync.result.updated'));
+    await refreshProfileSyncState();
+    return result;
+  } catch (error) {
+    showProfileSyncResult(false, t('st.sync.error.generic', { error: error?.message || t('st.sync.error.unknown') }));
+    throw error;
+  } finally {
+    restoreButton();
+  }
+}
+function checkedSyncPassword(requireConfirmation = false) { const password = profileSyncPassword?.value || ''; const confirmation = profileSyncConfirm?.value || ''; if (password.length < 12) throw new Error(t('st.sync.validation.password_length')); if (requireConfirmation && !confirmation) throw new Error(t('st.sync.validation.confirm_required')); if (confirmation && password !== confirmation) throw new Error(t('st.sync.validation.password_mismatch')); return password; }
+function promptConfirmedSyncPassword(label = t('st.sync.prompt.new_password')) {
+  const password = window.prompt(t('st.sync.prompt.password', { label }));
+  if (!password) return null;
+  if (password.length < 12) throw new Error(t('st.sync.validation.password_length'));
+  const confirmation = window.prompt(t('st.sync.prompt.confirm_password'));
+  if (!confirmation) throw new Error(t('st.sync.validation.confirm_required'));
+  if (password !== confirmation) throw new Error(t('st.sync.validation.password_mismatch'));
+  return password;
+}
+btnProfileSyncAuth?.addEventListener('click', async () => {
+  const email = (profileSyncEmail?.value || '').trim(); if (!email) return showProfileSyncResult(false, t('st.sync.validation.email_required'));
+  try { profileSyncChallenge = await profileSyncAction('profile_sync_auth_start', { email }); showProfileSyncResult(true, t('st.sync.auth.check_email'));
+    const poll = setInterval(async () => { if (!profileSyncChallenge) return clearInterval(poll); try { const result = await sendToBackground('profile_sync_auth_status', { challengeId: profileSyncChallenge.challenge_id, verifier: profileSyncChallenge.verifier }); if (result.token) { clearInterval(poll); profileSyncChallenge = null; showProfileSyncResult(true, t('st.sync.auth.success')); await refreshProfileSyncState(); } } catch (error) { clearInterval(poll); profileSyncChallenge = null; showProfileSyncResult(false, t('st.sync.error.generic', { error: error?.message || t('st.sync.error.unknown') })); } }, 3000); setTimeout(() => clearInterval(poll), 30 * 60 * 1000);
+  } catch { /* helper displayed the error */ }
+});
+btnProfileSyncEnable?.addEventListener('click', async () => { let password; try { password = checkedSyncPassword(true); } catch (e) { showProfileSyncResult(false, e.message); return; } await profileSyncAction('profile_sync_unlock', { password, create: true }).catch(() => {}); });
+btnProfileSyncUnlock?.addEventListener('click', async () => { let password; try { password = checkedSyncPassword(); } catch (e) { showProfileSyncResult(false, e.message); return; } await profileSyncAction('profile_sync_unlock', { password, create: false }).catch(() => {}); });
+btnProfileSyncNow?.addEventListener('click', () => profileSyncAction('profile_sync_now', {}, { button: btnProfileSyncNow, pending: t('st.sync.pending.syncing'), pendingLabel: t('st.sync.pending.syncing_short'), success: t('st.sync.result.current') }).catch(() => {}));
+btnProfileSyncLock?.addEventListener('click', () => profileSyncAction('profile_sync_lock').catch(() => {}));
+btnProfileSyncChange?.addEventListener('click', async () => { const oldPassword = window.prompt(t('st.sync.prompt.current_password')); if (!oldPassword) return; let newPassword; try { newPassword = promptConfirmedSyncPassword(); } catch (e) { showProfileSyncResult(false, e.message); return; } if (newPassword) await profileSyncAction('profile_sync_change_password', { oldPassword, newPassword }).catch(() => {}); });
+btnProfileSyncDisable?.addEventListener('click', () => { if (window.confirm(t('st.sync.confirm.disable'))) profileSyncAction('profile_sync_disable').catch(() => {}); });
+btnProfileSyncReset?.addEventListener('click', async () => { if (!window.confirm(t('st.sync.confirm.reset'))) return; let password; try { password = promptConfirmedSyncPassword(t('st.sync.prompt.replacement_password')); } catch (e) { showProfileSyncResult(false, e.message); return; } if (password) await profileSyncAction('profile_sync_reset', { password }).catch(() => {}); });
+if (profileSyncStatus) refreshProfileSyncState();
+
+// Persisted to chrome.storage.local in plaintext; the agent picks the
+// changes up via the storage.onChanged listener in background.js and
+// refreshes open conversations' system prompts on the next turn.
+
+function flashProfileResult(className, text) {
+  if (!profileTestResult) return;
+  profileTestResult.className = `test-result show ${className}`;
+  profileTestResult.textContent = text;
+  setTimeout(() => profileTestResult.classList.remove('show'), 2000);
+}
+
+// Enabling/disabling the toggle saves immediately — no "Save" click needed
+// for the on/off state so users don't get confused when the toggle
+// appears to not do anything.
+if (profileEnabledToggle) {
+  profileEnabledToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ profileEnabled: profileEnabledToggle.checked }).catch(() => {});
+  });
+}
+
+if (btnSaveProfile) {
+  btnSaveProfile.addEventListener('click', async () => {
+    const text = (profileTextArea?.value || '').trim();
+    await chrome.storage.local.set({ profileText: text });
+    flashProfileResult('ok', t('st.profile.saved'));
+  });
+}
+
+if (btnClearProfile) {
+  btnClearProfile.addEventListener('click', async () => {
+    if (profileTextArea) profileTextArea.value = '';
+    await chrome.storage.local.set({ profileText: '' });
+    flashProfileResult('ok', t('st.profile.cleared'));
+  });
+}
+
+function flashUserMemoryResult(className, text) {
+  if (!userMemoryTestResult) return;
+  userMemoryTestResult.className = `test-result show ${className}`;
+  userMemoryTestResult.textContent = text;
+  setTimeout(() => userMemoryTestResult.classList.remove('show'), 2500);
+}
+
+async function loadMemcodeStatus() {
+  if (!memcodeRecallToggle) return;
+  const result = await sendToBackground('memcode_recall_status').catch(() => null);
+  memcodeRecallToggle.disabled = !result?.connected;
+  memcodeRecallToggle.checked = result?.recallEnabled === true;
+  if (memcodeConnectButton) memcodeConnectButton.disabled = result?.connected === true;
+  if (memcodeDisconnectButton) memcodeDisconnectButton.disabled = result?.connected !== true;
+  if (memcodeRecallResult) {
+    memcodeRecallResult.className = 'test-result show';
+    memcodeRecallResult.textContent = t(result?.connected
+      ? (result.recallEnabled ? 'st.memcode.active' : 'st.memcode.connected')
+      : 'st.memcode.disconnected', { account: result?.accountId || 'unknown' });
+  }
+}
+
+memcodeConnectButton?.addEventListener('click', async () => {
+  memcodeConnectButton.disabled = true;
+  try {
+    const result = await sendToBackground('memcode_recall_connect');
+    if (!result?.ok) throw new Error(result?.error || 'Connection failed');
+    await loadMemcodeStatus();
+  } catch (error) {
+    memcodeConnectButton.disabled = false;
+    if (memcodeRecallResult) memcodeRecallResult.textContent = t('st.memcode.error', { error: error.message });
+  }
+});
+memcodeDisconnectButton?.addEventListener('click', async () => {
+  const result = await sendToBackground('memcode_recall_disconnect');
+  await loadMemcodeStatus();
+  if (result?.revocationFailed && memcodeRecallResult) {
+    memcodeRecallResult.textContent = t('st.memcode.revocation_warning');
+  }
+});
+memcodeRecallToggle?.addEventListener('change', async () => {
+  const result = await sendToBackground('memcode_recall_enable', { enabled: memcodeRecallToggle.checked });
+  if (!result?.ok) {
+    if (memcodeRecallResult) memcodeRecallResult.textContent = t('st.memcode.error', { error: result?.error || 'Setting unavailable' });
+  }
+  await loadMemcodeStatus();
+});
+
+const USER_MEMORY_FAILURE_REASON_KEYS = {
+  invalid_or_sensitive: 'st.memory.reason.invalid_or_sensitive',
+  not_found: 'st.memory.reason.not_found',
+};
+
+function userMemoryFailureText(res) {
+  const reasonKey = USER_MEMORY_FAILURE_REASON_KEYS[res?.reason];
+  if (reasonKey) return t(reasonKey);
+  return t('st.memory.failed', { error: res?.reason || res?.error || 'unknown error' });
+}
+
+function renderUserMemoryRecords(records = []) {
+  if (!userMemoryList) return;
+  const active = records.filter((record) => record && !record.archivedAt && record.text);
+  if (!active.length) {
+    userMemoryList.innerHTML = `<div style="font-size:12px;color:var(--text2);">${escapeHtml(t('st.memory.empty'))}</div>`;
+    return;
+  }
+  userMemoryList.innerHTML = active.map((record) => `
+    <div data-memory-id="${escapeHtml(record.id)}" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;margin:0;padding:12px;">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+        <code style="font-size:11px;color:var(--text2);">${escapeHtml(record.id)}</code>
+        <select class="user-memory-kind" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;">
+          ${['preference', 'profile_hint', 'workflow_preference'].map((kind) => `<option value="${kind}"${record.kind === kind ? ' selected' : ''}>${kind}</option>`).join('')}
+        </select>
+      </div>
+      <textarea class="user-memory-text" rows="3" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px 10px;font:inherit;font-size:13px;line-height:1.45;resize:vertical;">${escapeHtml(record.text)}</textarea>
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn-primary btn-save-user-memory" data-memory-id="${escapeHtml(record.id)}" data-i18n="st.memory.save">${escapeHtml(t('st.memory.save'))}</button>
+        <button class="btn-secondary btn-delete-user-memory" data-memory-id="${escapeHtml(record.id)}" data-i18n="st.memory.delete">${escapeHtml(t('st.memory.delete'))}</button>
+      </div>
+    </div>
+  `).join('');
+  userMemoryList.querySelectorAll('.btn-save-user-memory').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const card = btn.closest('[data-memory-id]');
+      const id = btn.dataset.memoryId;
+      const text = card?.querySelector('.user-memory-text')?.value || '';
+      const kind = card?.querySelector('.user-memory-kind')?.value || 'preference';
+      const res = await sendToBackground('update_user_memory', { id, text, kind });
+      if (!res?.ok) {
+        flashUserMemoryResult('error', userMemoryFailureText(res));
+        return;
+      }
+      flashUserMemoryResult('ok', t('st.memory.saved'));
+      await loadUserMemorySettings();
+    });
+  });
+  userMemoryList.querySelectorAll('.btn-delete-user-memory').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const res = await sendToBackground('delete_user_memory', { id: btn.dataset.memoryId });
+      if (!res?.ok) {
+        flashUserMemoryResult('error', userMemoryFailureText(res));
+        return;
+      }
+      flashUserMemoryResult('ok', t('st.memory.deleted'));
+      await loadUserMemorySettings();
+    });
+  });
+}
+
+async function loadUserMemorySettings() {
+  if (!userMemoryList) return;
+  const res = await sendToBackground('get_user_memory').catch((error) => ({ ok: false, error: error.message }));
+  if (!res?.ok) {
+    renderUserMemoryRecords([]);
+    flashUserMemoryResult('error', t('st.memory.failed', { error: res?.error || 'unknown error' }));
+    return;
+  }
+  if (userMemoryEnabledToggle) userMemoryEnabledToggle.checked = res.enabled !== false;
+  if (userMemoryAutoToggle) userMemoryAutoToggle.checked = res.autoCaptureEnabled === true;
+  if (userMemoryFormToggle) userMemoryFormToggle.checked = res.formCaptureEnabled === true;
+  if (userMemoryMaxCharsInput) userMemoryMaxCharsInput.value = String(res.maxPromptChars ?? USER_MEMORY_DEFAULT_MAX_PROMPT_CHARS);
+  renderUserMemoryRecords(res.records || []);
+}
+
+if (userMemoryEnabledToggle) {
+  userMemoryEnabledToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ [USER_MEMORY_ENABLED_KEY]: userMemoryEnabledToggle.checked }).catch(() => {});
+  });
+}
+
+if (userMemoryAutoToggle) {
+  userMemoryAutoToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ [USER_MEMORY_AUTO_CAPTURE_KEY]: userMemoryAutoToggle.checked }).catch(() => {});
+  });
+}
+
+if (userMemoryFormToggle) {
+  userMemoryFormToggle.addEventListener('change', async () => {
+    await chrome.storage.local.set({ [USER_MEMORY_FORM_CAPTURE_KEY]: userMemoryFormToggle.checked }).catch(() => {});
+  });
+}
+
+if (userMemoryMaxCharsInput) {
+  userMemoryMaxCharsInput.addEventListener('change', async () => {
+    const rawMaxPromptChars = String(userMemoryMaxCharsInput.value || '').trim();
+    const value = rawMaxPromptChars === ''
+      ? USER_MEMORY_DEFAULT_MAX_PROMPT_CHARS
+      : normalizeUserMemoryMaxPromptChars(rawMaxPromptChars);
+    userMemoryMaxCharsInput.value = String(value);
+    await chrome.storage.local.set({ [USER_MEMORY_MAX_PROMPT_CHARS_KEY]: value }).catch(() => {});
+  });
+}
+
+if (btnRefreshUserMemory) {
+  btnRefreshUserMemory.addEventListener('click', loadUserMemorySettings);
+}
+
+if (btnClearUserMemory) {
+  btnClearUserMemory.addEventListener('click', async () => {
+    if (!window.confirm(t('st.memory.clear_confirm'))) return;
+    const res = await sendToBackground('clear_user_memory');
+    if (!res?.ok) {
+      flashUserMemoryResult('error', t('st.memory.failed', { error: res?.error || 'unknown error' }));
+      return;
+    }
+    flashUserMemoryResult('ok', t('st.memory.cleared'));
+    await loadUserMemorySettings();
+  });
+}
+
+if (btnExportUserMemory) {
+  btnExportUserMemory.addEventListener('click', async () => {
+    const res = await sendToBackground('export_user_memory');
+    if (!res?.ok) {
+      flashUserMemoryResult('error', t('st.memory.failed', { error: res?.error || 'unknown error' }));
+      return;
+    }
+    const blob = new Blob([res.json || JSON.stringify(res.store || {}, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `webbrain-user-memory-${Date.now()}.json`;
+    document.body.appendChild(a);
+    try { a.click(); } finally {
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 7000);
+    }
+    flashUserMemoryResult('ok', t('st.memory.exported'));
+  });
+}
+
+if (btnImportUserMemory) {
+  btnImportUserMemory.addEventListener('click', async () => {
+    const json = userMemoryImportText?.value || '';
+    if (!json.trim()) {
+      flashUserMemoryResult('error', t('st.memory.import_empty'));
+      return;
+    }
+    let res;
+    try {
+      res = await sendToBackground('import_user_memory', { json });
+    } catch (error) {
+      flashUserMemoryResult('error', t('st.memory.failed', { error: error?.message || 'invalid JSON' }));
+      return;
+    }
+    if (!res?.ok) {
+      flashUserMemoryResult('error', t('st.memory.failed', { error: res?.error || 'invalid JSON' }));
+      return;
+    }
+    if (userMemoryImportText) userMemoryImportText.value = '';
+    flashUserMemoryResult('ok', t('st.memory.imported'));
+    await loadUserMemorySettings();
+  });
+}
+
+// --- Provider Rendering ---
+
+// Prompt-tier selector, shown only for local + OpenRouter providers (cloud is
+// always 'full'). Mirrors the resolution in providers/base.js get promptTier().
+const PROMPT_TIER_FIELD = {
+  key: 'promptTier',
+  labelKey: 'st.provider.field.prompt_tier',
+  type: 'select',
+  options: [
+    { value: 'compact', labelKey: 'st.provider.field.prompt_tier.compact' },
+    { value: 'mid', labelKey: 'st.provider.field.prompt_tier.mid' },
+    { value: 'full', labelKey: 'st.provider.field.prompt_tier.full' },
+  ],
+};
+
+const VISION_MODE_FIELD = {
+  key: 'visionMode',
+  labelKey: 'st.provider.field.supports_vision',
+  type: 'select',
+  options: [
+    { value: 'auto', labelKey: 'st.provider.field.vision_auto' },
+    { value: 'on', labelKey: 'st.provider.field.vision_force_on' },
+    { value: 'off', labelKey: 'st.providers.compat.value.off' },
+  ],
+};
+const TOOL_MODE_FIELD = {
+  key: 'toolsMode',
+  labelKey: 'st.provider.field.tools_mode',
+  type: 'select',
+  collapsed: true,
+  options: [
+    { value: 'auto', labelKey: 'st.provider.field.vision_auto' },
+    { value: 'on', labelKey: 'st.provider.field.vision_force_on' },
+    { value: 'off', labelKey: 'st.providers.compat.value.off' },
+  ],
+};
+const OPENROUTER_VISION_MODE_FIELD = { ...VISION_MODE_FIELD, collapsed: true };
+const OLLAMA_VISION_MODE_FIELD = VISION_MODE_FIELD;
+const OPTIONAL_LOCAL_API_KEY_FIELD = {
+  key: 'apiKey',
+  labelKey: 'st.provider.field.api_key',
+  type: 'password',
+  placeholder: 'optional',
+  collapsed: true,
+};
+const SHARE_RESEARCH_FIELD = {
+  key: 'shareQueriesForResearch',
+  labelKey: 'st.providers.share_research.label',
+  hintKey: 'st.providers.share_research.hint',
+  type: 'checkbox',
+};
+
+export {
+  COMPANION_PREFERRED_MODEL_PATTERNS,
+  selectPreferredCompanionModel,
+};
+
+if (typeof window !== 'undefined') {
+  window.COMPANION_PREFERRED_MODEL_PATTERNS = COMPANION_PREFERRED_MODEL_PATTERNS;
+  window.selectPreferredCompanionModel = selectPreferredCompanionModel;
+}
+
+const companionAutoCheckInFlight = new Set();
+const companionAutoCheckedAt = new Map();
+
+function updateCollapsedProviderHeader(id, config) {
+  const card = document.querySelector(`.provider-card[data-provider-id="${id}"]`);
+  if (!card) return;
+  const isSelected = id === activeProviderId;
+  const isConfigured = id !== 'webbrain_cloud' && config.configured === true;
+  if (isConfigured) {
+    card.classList.add('configured');
+  } else {
+    card.classList.remove('configured');
+  }
+  const header = card.querySelector('.provider-header');
+  if (!header) return;
+  const left = header.querySelector('.provider-header-left');
+  if (left) {
+    let modelBadge = left.querySelector('.provider-model');
+    const modelStr = (config.model && String(config.model).trim()) || '';
+    if (modelStr) {
+      if (!modelBadge) {
+        modelBadge = document.createElement('span');
+        modelBadge.className = 'provider-model';
+        left.appendChild(modelBadge);
+      }
+      modelBadge.title = modelStr;
+      modelBadge.textContent = modelStr;
+    } else if (modelBadge) {
+      modelBadge.remove();
+    }
+  }
+  const badges = header.querySelector('.provider-status-badges');
+  if (badges) {
+    let activeBadge = badges.querySelector('.provider-status-badge.active');
+    if (isConfigured) {
+      if (!activeBadge) {
+        activeBadge = document.createElement('span');
+        activeBadge.className = 'provider-status-badge active';
+        activeBadge.textContent = t('st.providers.active');
+        badges.prepend(activeBadge);
+      }
+    } else if (activeBadge) {
+      activeBadge.remove();
+    }
+  }
+  refreshActiveProviderFilterCount();
+  refreshProviderCardStatus(id);
+}
+
+async function checkAndAutoSelectCompanionModel(id) {
+  if (companionAutoCheckInFlight.has(id)) return;
+  const lastCheck = companionAutoCheckedAt.get(id) || 0;
+  if (Date.now() - lastCheck < 10000) return;
+  companionAutoCheckInFlight.add(id);
+  companionAutoCheckedAt.set(id, Date.now());
+
+  try {
+    const res = await sendToBackground('list_provider_models', { providerId: id });
+    if (!res?.ok || !Array.isArray(res.models) || res.models.length === 0) {
+      return;
+    }
+
+    const config = providersData[id];
+    if (!config) return;
+
+    const currentModel = String(config.model || '').trim();
+    let selectedModel = currentModel;
+    if (!currentModel || !res.models.includes(currentModel)) {
+      selectedModel = selectPreferredCompanionModel(res.models);
+    }
+    if (!selectedModel) return;
+
+    const needsUpdate = config.model !== selectedModel || !config.configured;
+    if (needsUpdate) {
+      config.model = selectedModel;
+      config.configured = true;
+      if (res.baseUrl && (!config.baseUrl || config.baseUrl === 'http://127.0.0.1:8327/v1')) {
+        config.baseUrl = res.baseUrl;
+      }
+      if (res.contextWindow && (!config.contextWindow || config.manualContextWindow !== true)) {
+        config.contextWindow = res.contextWindow;
+      }
+
+      await sendToBackground('update_provider', {
+        providerId: id,
+        config: {
+          model: selectedModel,
+          configured: true,
+          ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+          ...(config.contextWindow ? { contextWindow: config.contextWindow } : {}),
+        },
+        markConfigured: true,
+      });
+
+      updateCollapsedProviderHeader(id, config);
+    }
+  } catch {
+    // Companion is not running or unreachable — do not error or warn
+  } finally {
+    companionAutoCheckInFlight.delete(id);
+  }
+}
+
+function providerDefinitionId(id, config = providersData[id]) {
+  return String(config?.sourceProviderId || config?.duplicateOf || id || '');
+}
+
+function visionStatusKey(id, config) {
+  if (!providerVisionDetectionMatches(id, config)) return 'st.provider.field.vision_pending';
+  return config.visionDetection.supportsVision
+    ? 'st.provider.field.vision_detected_vision'
+    : 'st.provider.field.vision_detected_text';
+}
+
+function refreshVisionStatus(id) {
+  const definitionId = providerDefinitionId(id);
+  if (!VISION_UI_PROVIDER_IDS.has(definitionId)) return;
+  const hint = definitionId === 'ollama'
+    ? document.querySelector(`[data-ollama-vision-status="${id}"]`)
+    : document.querySelector(`[data-vision-status="${id}"]`);
+  if (!hint) return;
+  const mode = document.querySelector(`select[data-provider="${id}"][data-key="visionMode"]`)?.value || 'auto';
+  hint.hidden = mode !== 'auto';
+  if (hint.hidden) return;
+  const config = {
+    ...providersData[id],
+    visionMode: mode,
+    model: document.querySelector(`input[data-provider="${id}"][data-key="model"]`)?.value,
+    baseUrl: document.querySelector(`input[data-provider="${id}"][data-key="baseUrl"]`)?.value,
+  };
+  hint.textContent = t(visionStatusKey(id, config));
+}
+
+function refreshOllamaVisionStatus() {
+  refreshVisionStatus('ollama');
+}
+
+function providerVisionDetectionMatches(id, config, detection = config?.visionDetection) {
+  const definitionId = providerDefinitionId(id, config);
+  if (definitionId !== 'ollama') return visionDetectionMatches(definitionId, config, detection, { allowTransient: true });
+  const model = String(config?.model || '').trim();
+  const baseUrl = canonicalizeOllamaBaseUrl(config?.baseUrl);
+  return !!model && !!baseUrl
+    && detection?.source === 'ollama_show'
+    && String(detection?.model || '').trim().toLowerCase() === model.toLowerCase()
+    && canonicalizeOllamaBaseUrl(detection?.baseUrl) === baseUrl
+    && typeof detection?.supportsVision === 'boolean';
+}
+
+const CONTEXT_WINDOW_FIELD = {
+  key: 'contextWindow',
+  labelKey: 'st.provider.field.context_window',
+  type: 'number',
+  placeholder: '16384',
+  min: 4096,
+  step: 1024,
+};
+
+const WEBGPU_CONTEXT_WINDOW_FIELD = {
+  ...CONTEXT_WINDOW_FIELD,
+  placeholder: '32768',
+};
+
+// Matches LOCAL_OPENAI_PROXY_CONTEXT_WINDOW (providers/context-windows.js).
+const LOCAL_PROXY_CONTEXT_WINDOW_FIELD = {
+  ...CONTEXT_WINDOW_FIELD,
+  placeholder: '65536',
+};
+
+const MAX_OUTPUT_TOKENS_FIELD = {
+  key: 'maxOutputTokens',
+  labelKey: 'st.provider.field.max_output_tokens',
+  type: 'number',
+  placeholder: '4096',
+  min: 1,
+  step: 1024,
+};
+
+const INPUT_COST_ESTIMATE_FIELD =
+  { key: 'inputCostPerMillionUsd', labelKey: 'st.provider.field.input_cost_per_million', type: 'number', placeholder: '3.00' };
+const CACHE_READ_COST_ESTIMATE_FIELD =
+  { key: 'cacheReadCostPerMillionUsd', labelKey: 'st.provider.field.cache_read_cost_per_million', type: 'number', placeholder: '0.30' };
+const CACHE_WRITE_COST_ESTIMATE_FIELD =
+  { key: 'cacheWriteCostPerMillionUsd', labelKey: 'st.provider.field.cache_write_cost_per_million', type: 'number', placeholder: '3.75' };
+const OUTPUT_COST_ESTIMATE_FIELD =
+  { key: 'outputCostPerMillionUsd', labelKey: 'st.provider.field.output_cost_per_million', type: 'number', placeholder: '15.00' };
+const COST_ESTIMATE_FIELDS = [
+  INPUT_COST_ESTIMATE_FIELD,
+  CACHE_READ_COST_ESTIMATE_FIELD,
+  OUTPUT_COST_ESTIMATE_FIELD,
+];
+// OpenAI nested usage reports included cache writes (1.25× input for GPT-5.6),
+// but not Anthropic/Bedrock-style 1-hour TTL write buckets.
+const OPENAI_COST_ESTIMATE_FIELDS = [
+  INPUT_COST_ESTIMATE_FIELD,
+  CACHE_READ_COST_ESTIMATE_FIELD,
+  { ...CACHE_WRITE_COST_ESTIMATE_FIELD, placeholder: '3.13' },
+  OUTPUT_COST_ESTIMATE_FIELD,
+];
+const CACHE_AWARE_COST_ESTIMATE_FIELDS = [
+  INPUT_COST_ESTIMATE_FIELD,
+  CACHE_READ_COST_ESTIMATE_FIELD,
+  CACHE_WRITE_COST_ESTIMATE_FIELD,
+  { key: 'cacheWrite1hCostPerMillionUsd', labelKey: 'st.provider.field.cache_write_1h_cost_per_million', type: 'number', placeholder: '6.00' },
+  OUTPUT_COST_ESTIMATE_FIELD,
+];
+
+const ZERO_ALLOWED_NUMBER_FIELDS = new Set([
+  'inputCostPerMillionUsd',
+  'cacheReadCostPerMillionUsd',
+  'cacheWriteCostPerMillionUsd',
+  'cacheWrite1hCostPerMillionUsd',
+  'outputCostPerMillionUsd',
+]);
+const MIN_API_KEY_LENGTH = 12;
+const DUMMY_API_KEYS = new Set(['ollama', 'lm-studio']);
+
+function providerInputValue(input) {
+  if (input.dataset.type === 'checkbox' || input.type === 'checkbox') {
+    return input.checked;
+  }
+  if (input.dataset.type === 'number' || input.type === 'number') {
+    const raw = input.value.trim();
+    if (raw === '') return '';
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return '';
+    return ZERO_ALLOWED_NUMBER_FIELDS.has(input.dataset.key)
+      ? (n >= 0 ? n : '')
+      : (n > 0 ? n : '');
+  }
+  return input.value;
+}
+
+function setProviderConfigValue(config, path, value) {
+  const keys = String(path || '').split('.').filter(Boolean);
+  if (!keys.length) return;
+  let target = config;
+  for (const key of keys.slice(0, -1)) {
+    if (!target[key] || typeof target[key] !== 'object' || Array.isArray(target[key])) target[key] = {};
+    target = target[key];
+  }
+  target[keys.at(-1)] = value;
+}
+
+function providerApiKeyWarning(id, config) {
+  const input = document.querySelector(`input[data-provider="${id}"][data-key="apiKey"]`);
+  if (!input) return '';
+  const rawApiKey = String(config.apiKey || '').trim();
+  const apiKey = DUMMY_API_KEYS.has(rawApiKey) ? '' : rawApiKey;
+  const keyIsOptional = providersData[id]?.category === 'local' && config.requiresApiKey !== true;
+  const looksInvalid = apiKey ? apiKey.length < MIN_API_KEY_LENGTH : !keyIsOptional;
+  input.setAttribute('aria-invalid', looksInvalid ? 'true' : 'false');
+  return looksInvalid ? t('st.providers.api_key_warning') : '';
+}
+
+function restoreProviderApiKeyWarnings() {
+  for (const [id, config] of Object.entries(providersData)) {
+    if (config?.configured !== true) continue;
+    const warning = providerApiKeyWarning(id, config);
+    if (warning) setProviderTestResult(id, 'warn', warning);
+  }
+}
+
+function supportsProviderCompatibilityControls(id, config = {}) {
+  return id !== 'webbrain_cloud' && ['openai', 'llamacpp', 'azure_openai'].includes(config.type);
+}
+
+function supportsProviderCompatibilitySettings(id, config = {}) {
+  return supportsProviderCompatibilityControls(id, config)
+    || ['anthropic', 'anthropic_oauth', 'vertex_anthropic'].includes(config.type);
+}
+
+function providerExtraBodyText(value) {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length === 0) return '';
+  try { return JSON.stringify(value, null, 2); } catch { return ''; }
+}
+
+function prettyCompatibilityValue(value) {
+  const key = `st.providers.compat.value.${value}`;
+  const translated = t(key);
+  return translated === key ? (value || '') : translated;
+}
+
+function prettyOpenRouterRoutingVariant(value) {
+  if (value === 'standard') return prettyCompatibilityValue(value);
+  return value === 'nitro' ? 'Nitro' : 'Exacto';
+}
+
+function shouldPersistProviderInput(input) {
+  return input.dataset.key !== 'routingVariant' || input.dataset.routingExplicit === 'true';
+}
+
+function syncInferredOpenRouterRoutingVariant(id, model) {
+  const select = document.querySelector(`select[data-provider="${id}"][data-key="routingVariant"]`);
+  if (!select || select.dataset.routingExplicit === 'true') return;
+  select.value = openRouterRoutingVariant({ model });
+}
+
+function automaticTokenField(config) {
+  if (shouldUseOpenAIResponsesApi(config)) return 'max_output_tokens';
+  const isNewOfficialContract = config.type === 'openai' && isNewOpenAIContractConfig(config);
+  return isNewOfficialContract ? 'max_completion_tokens' : 'max_tokens';
+}
+
+function compatibilitySummary(config) {
+  const extraCount = config.extraBody && typeof config.extraBody === 'object' && !Array.isArray(config.extraBody)
+    ? Object.keys(config.extraBody).length
+    : 0;
+  if (['anthropic', 'anthropic_oauth', 'vertex_anthropic'].includes(config.type)) {
+    return extraCount
+      ? t(extraCount === 1 ? 'st.providers.compat.summary_extra' : 'st.providers.compat.summary_extra_plural', { count: extraCount })
+      : t('st.providers.compat.provider_default');
+  }
+  const compat = normalizeProviderCompatibility(config);
+  const detected = detectedCompatibilityPreset(config);
+  const preset = compat.preset === 'auto'
+    ? t('st.providers.compat.auto_detected', { preset: prettyCompatibilityValue(detected) })
+    : prettyCompatibilityValue(compat.preset);
+  const reasoning = compat.reasoningEffort === 'auto'
+    ? t('st.providers.compat.provider_default')
+    : prettyCompatibilityValue(compat.reasoningEffort);
+  const role = compat.systemPromptRole === 'auto'
+    ? prettyCompatibilityValue('system')
+    : prettyCompatibilityValue(compat.systemPromptRole);
+  const tokens = compat.maxTokensField === 'auto' ? automaticTokenField(config) : compat.maxTokensField;
+  const extra = extraCount
+    ? t(extraCount === 1 ? 'st.providers.compat.summary_extra' : 'st.providers.compat.summary_extra_plural', { count: extraCount })
+    : '';
+  const routing = String(config.providerName || '').toLowerCase() === 'openrouter'
+    ? ` · ${prettyOpenRouterRoutingVariant(openRouterRoutingVariant(config))}`
+    : '';
+  return `${t('st.providers.compat.summary', { preset, reasoning, role, tokens, extra })}${routing}`;
+}
+
+function currentProviderCompatibilityConfig(id) {
+  const source = providersData[id] || {};
+  const config = { ...source, compat: { ...(source.compat || {}) } };
+  document.querySelectorAll(`.provider-compatibility [data-provider="${id}"]`).forEach((input) => {
+    if (!shouldPersistProviderInput(input)) return;
+    if (input.dataset.type === 'json') {
+      try { config.extraBody = parseProviderExtraBodyJson(input.value); } catch { config.extraBody = {}; }
+      return;
+    }
+    setProviderConfigValue(config, input.dataset.key, providerInputValue(input));
+  });
+  const modelInput = document.querySelector(`input[data-provider="${id}"][data-key="model"]`);
+  const baseUrlInput = document.querySelector(`input[data-provider="${id}"][data-key="baseUrl"]`);
+  if (modelInput) config.model = modelInput.value;
+  if (baseUrlInput) config.baseUrl = baseUrlInput.value;
+  return config;
+}
+
+function refreshProviderCompatibilitySummary(id) {
+  const details = document.querySelector(`.provider-compatibility[data-provider-id="${id}"]`);
+  if (!details) return;
+  const textarea = details.querySelector('textarea[data-type="json"]');
+  const validation = details.querySelector('.provider-compatibility-validation');
+  let error = '';
+  if (textarea) {
+    try { parseProviderExtraBodyJson(textarea.value); } catch (e) { error = e.message; }
+    textarea.setAttribute('aria-invalid', error ? 'true' : 'false');
+  }
+  if (validation) validation.textContent = error;
+  const summary = details.querySelector('.provider-compatibility-summary');
+  if (summary) summary.textContent = compatibilitySummary(currentProviderCompatibilityConfig(id));
+}
+
+function renderProviderCompatibilitySettings(id, config) {
+  if (!supportsProviderCompatibilitySettings(id, config)) return '';
+  const showCompatibilityControls = supportsProviderCompatibilityControls(id, config);
+  const showOpenRouterRouting = String(config.providerName || '').toLowerCase() === 'openrouter';
+  const compat = normalizeProviderCompatibility(config);
+  const extraBody = providerCompatibilityJsonDrafts.has(id)
+    ? providerCompatibilityJsonDrafts.get(id)
+    : providerExtraBodyText(config.extraBody);
+  const options = (items, current) => items.map(([value, label]) => (
+    `<option value="${value}"${value === current ? ' selected' : ''}>${escapeHtml(label)}</option>`
+  )).join('');
+  const valueLabel = (value) => prettyCompatibilityValue(value);
+  return `
+    <details class="provider-compatibility" data-provider-id="${id}">
+      <summary>
+        <span class="provider-compatibility-title">${escapeHtml(t('st.providers.compat.title'))}</span>
+        <span class="provider-compatibility-summary">${escapeHtml(compatibilitySummary(config))}</span>
+      </summary>
+      <div class="provider-compatibility-body">
+        ${showCompatibilityControls ? `
+          <p>${escapeHtml(t('st.providers.compat.blurb'))}</p>
+          <div class="provider-compatibility-grid">
+          <div class="field">
+            <label>${escapeHtml(t('st.providers.compat.preset'))}</label>
+            <select data-provider="${id}" data-key="compat.preset" data-type="select">
+              ${options([['auto', valueLabel('auto')], ['openai', valueLabel('openai')], ['qwen', valueLabel('qwen')], ['deepseek', valueLabel('deepseek')], ['openrouter', valueLabel('openrouter')], ['custom', valueLabel('custom')]], compat.preset)}
+            </select>
+          </div>
+          ${showOpenRouterRouting ? `
+          <div class="field">
+            <label>${escapeHtml(valueLabel('openrouter'))}</label>
+            <select data-provider="${id}" data-key="routingVariant" data-type="select"
+                    data-routing-explicit="${Object.hasOwn(config, 'routingVariant') ? 'true' : 'false'}">
+              ${options(OPENROUTER_ROUTING_VARIANTS.map((value) => [value, prettyOpenRouterRoutingVariant(value)]), openRouterRoutingVariant(config))}
+            </select>
+          </div>
+          ` : ''}
+          <div class="field">
+            <label>${escapeHtml(t('st.providers.compat.reasoning'))}</label>
+            <select data-provider="${id}" data-key="compat.reasoningEffort" data-type="select">
+              ${options([['auto', valueLabel('auto')], ['off', valueLabel('off')], ['minimal', valueLabel('minimal')], ['low', valueLabel('low')], ['medium', valueLabel('medium')], ['high', valueLabel('high')], ['xhigh', valueLabel('xhigh')], ['max', valueLabel('max')]], compat.reasoningEffort)}
+            </select>
+          </div>
+          <div class="field">
+            <label>${escapeHtml(t('st.providers.compat.system_role'))}</label>
+            <select data-provider="${id}" data-key="compat.systemPromptRole" data-type="select">
+              ${options([['auto', valueLabel('auto')], ['system', valueLabel('system')], ['developer', valueLabel('developer')]], compat.systemPromptRole)}
+            </select>
+          </div>
+          <div class="field">
+            <label>${escapeHtml(t('st.providers.compat.token_field'))}</label>
+            <select data-provider="${id}" data-key="compat.maxTokensField" data-type="select">
+              ${options([['auto', valueLabel('auto')], ['max_tokens', 'max_tokens'], ['max_completion_tokens', 'max_completion_tokens']], compat.maxTokensField)}
+            </select>
+          </div>
+          </div>
+        ` : ''}
+        <div class="field provider-compatibility-json">
+          <label>${escapeHtml(t('st.providers.compat.extra_body'))}</label>
+          <textarea data-provider="${id}" data-key="extraBody" data-type="json" spellcheck="false"
+                    aria-invalid="false" placeholder="${escapeHtml(t('st.providers.compat.extra_body_placeholder'))}">${escapeHtml(extraBody)}</textarea>
+          <div class="provider-compatibility-help">${escapeHtml(t('st.providers.compat.extra_body_help'))}</div>
+        </div>
+        <div class="provider-compatibility-footer">
+          <button type="button" class="btn-secondary btn-reset-compatibility" data-provider="${id}">${escapeHtml(t('st.providers.compat.reset'))}</button>
+          <span class="provider-compatibility-validation" role="status"></span>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+// Effective tier for the dropdown's initial value — same precedence as the
+// provider getter: cloud is forced full; an explicit promptTier wins; the
+// legacy useCompactPrompt boolean maps to compact; otherwise local → mid.
+function effectivePromptTier(config) {
+  if ((config.category || 'cloud') === 'cloud') return 'full';
+  const tier = config.promptTier;
+  if (tier === 'compact' || tier === 'mid' || tier === 'full') return tier;
+  if (config.useCompactPrompt) return 'compact';
+  return config.category === 'local' ? 'mid' : 'full';
+}
+
+function providerDisplayLabel(id, config = {}) {
+  if (id === 'webbrain_cloud') return 'WebBrain Compass';
+  if (id === 'webbrain_companion' && (!config.label || config.label === 'WebBrain Companion'
+    || translationsForKey('st.providers.companion_guide.title').includes(config.label))) {
+    return t('st.providers.companion_guide.title');
+  }
+  return config.label || id;
+}
+
+function providerSearchTextForEntry(id, config, fieldDefs) {
+  const fieldText = fieldDefs.flatMap((field) => [
+    field.key,
+    field.labelKey ? t(field.labelKey) : field.label,
+    field.placeholderKey ? t(field.placeholderKey) : field.placeholder,
+    ...(field.suggestions || []),
+    ...(field.options || []).flatMap((option) => [
+      option.value,
+      option.labelKey ? t(option.labelKey) : option.label,
+    ]),
+  ]).filter(Boolean).join(' ');
+  return normalizeGeneralSearchText([
+    id,
+    providerDisplayLabel(id, config),
+    config.label,
+    providerDefinitionId(id, config) === 'webbrain_companion'
+      ? `${t('st.providers.companion_guide.summary')} ${t('st.providers.companion_guide.supported')}`
+      : '',
+    config.type,
+    config.category,
+    config.model,
+    config.baseUrl,
+    fieldText,
+    supportsProviderCompatibilitySettings(id, config)
+      ? `advanced model compatibility reasoning thinking system developer max tokens custom request body json${String(config.providerName || '').toLowerCase() === 'openrouter' ? ' openrouter routing standard nitro exacto speed throughput tool quality' : ''}`
+      : '',
+  ].filter(Boolean).join(' '));
+}
+
+function providerSearchRank(id, config, query) {
+  const names = [id, providerDisplayLabel(id, config), config.label, config.providerName]
+    .filter(Boolean)
+    .map(normalizeGeneralSearchText);
+  if (names.some((name) => name === query)) return 0;
+  if (names.some((name) => name.startsWith(query))) return 1;
+  if (names.some((name) => name.includes(query))) return 2;
+  return 3;
+}
+
+function providerSubscriptionGuideHtml(definitionId) {
+  if (definitionId === 'webbrain_companion') {
+    return `<aside class="provider-subscription-guide provider-companion-guide" role="note">
+      <span>${escapeHtml(t('st.providers.companion_guide.body'))}</span>
+      <a href="${WEBBRAIN_COMPANION_DOWNLOAD_BASE}windows-setup.exe" target="_blank" rel="noopener noreferrer">Windows ↓</a>
+      <a href="${WEBBRAIN_COMPANION_DOWNLOAD_BASE}macos-universal.zip" target="_blank" rel="noopener noreferrer">macOS ↓</a>
+      <a href="${WEBBRAIN_COMPANION_DOWNLOAD_BASE}linux-x64.tar.gz" target="_blank" rel="noopener noreferrer">Linux x64 ↓</a>
+      <a href="${WEBBRAIN_COMPANION_DOWNLOAD_BASE}linux-arm64.tar.gz" target="_blank" rel="noopener noreferrer">Linux Arm64 ↓</a>
+    </aside>`;
+  }
+  if (definitionId === 'local_openai_proxy') {
+    return `<aside class="provider-subscription-guide provider-local-proxy-guide" role="note">
+      <span class="provider-subscription-guide-icon" aria-hidden="true">🔌</span>
+      <span>${escapeHtml(t('st.providers.subscription_guide.local_body'))}</span>
+      <a href="${EASY_CLI_PROXY_GUIDE_URL}" target="_blank" rel="noopener noreferrer">${escapeHtml(t('st.providers.subscription_guide.local_link'))} ↗</a>
+    </aside>`;
+  }
+  const product = SUBSCRIPTION_GUIDE_PRODUCTS[definitionId];
+  if (!product) return '';
+  return `<aside class="provider-subscription-guide" role="note">
+    <span class="provider-subscription-guide-icon" aria-hidden="true">🔌</span>
+    <span>${escapeHtml(t('st.providers.subscription_guide.card_body', { product }))}</span>
+    <a href="${WEBBRAIN_COMPANION_SITE_URL}" target="_blank" rel="noopener noreferrer">${escapeHtml(t('st.providers.companion_guide.download'))} ↗</a>
+  </aside>`;
+}
+
+// The WebGPU chat error points users at Providers > WebGPU, so the
+// card needs its own download surface instead of sending everyone to
+// Apocalypse Mode. This drives the same background routes
+// (`start/stop/get_webgpu_download_status`) with a start/stop button and a
+// status line, using only already-translated `webgpu_download` strings.
+let webgpuDownloadPollTimer = null;
+let webgpuDownloadActionInFlight = false;
+
+function normalizeWebgpuDownloadSnapshot(snapshot = {}) {
+  const allowedStatuses = new Set(['checking', 'not-downloaded', 'downloading', 'paused', 'stopping', 'ready', 'error']);
+  const normalizeStatus = status => ['starting', 'queued'].includes(status)
+    ? 'downloading' : allowedStatuses.has(status) ? status : 'not-downloaded';
+  const status = normalizeStatus(snapshot.status);
+  const loaded = Math.max(0, Number(snapshot.loaded) || 0);
+  const total = Math.max(0, Number(snapshot.total) || 0);
+  const progress = status === 'ready'
+    ? 100
+    : Math.max(0, Math.min(100, Number(snapshot.progress) || (total > 0 ? loaded / total * 100 : 0)));
+  const rawTransfer = snapshot.activeTransfer && typeof snapshot.activeTransfer === 'object'
+    ? snapshot.activeTransfer
+    : null;
+  // Preserve the sibling transfer (e.g. Bonsai downloading while the ONNX
+  // card queries Compass): dropping it stops polling and hides Stop control.
+  let activeTransfer = null;
+  if (rawTransfer) {
+    const transferStatus = normalizeStatus(rawTransfer.status);
+    const transferLoaded = Math.max(0, Number(rawTransfer.loaded) || 0);
+    const transferTotal = Math.max(0, Number(rawTransfer.total) || 0);
+    const transferProgress = transferStatus === 'ready'
+      ? 100
+      : Math.max(0, Math.min(100, Number(rawTransfer.progress) || (transferTotal > 0 ? transferLoaded / transferTotal * 100 : 0)));
+    activeTransfer = {
+      status: transferStatus,
+      ready: rawTransfer.ready === true || transferStatus === 'ready',
+      progress: Math.round(transferProgress),
+      error: String(rawTransfer.error || ''),
+      modelId: String(rawTransfer.modelId || rawTransfer.model || ''),
+      dtype: rawTransfer.dtype,
+    };
+  }
+  return {
+    status,
+    ready: snapshot.ready === true || status === 'ready',
+    progress: Math.round(progress),
+    error: String(snapshot.error || ''),
+    modelId: String(snapshot.modelId || snapshot.model || ''),
+    dtype: snapshot.dtype,
+    activeTransfer,
+  };
+}
+
+function isActiveWebgpuTransfer(state) {
+  return !!state && state.ready !== true
+    && ['checking', 'downloading', 'paused', 'stopping'].includes(state.status);
+}
+
+function webgpuDownloadControlState(state) {
+  const sibling = state.activeTransfer;
+  const model = String(state.modelId || '').trim().toLowerCase();
+  const siblingModel = String(sibling?.modelId || '').trim().toLowerCase();
+  if (!siblingModel || siblingModel === model) return state;
+  const priority = item => !isActiveWebgpuTransfer(item) ? 0 : item.status === 'paused' ? 1 : 2;
+  return priority(sibling) > priority(state) ? sibling : state;
+}
+
+function webgpuDownloadCardLabel(state) {
+  if (state.ready || ['downloading', 'paused', 'stopping'].includes(state.status)) {
+    return t('st.providers.webgpu_download.stop');
+  }
+  return t('st.providers.webgpu_download.start');
+}
+
+function webgpuDownloadStatusLine(state) {
+  if (state.ready) return t('st.providers.webgpu_download.ready_detail');
+  switch (state.status) {
+    case 'checking':
+      return t('st.providers.webgpu_download.checking');
+    case 'downloading':
+      return t('st.providers.webgpu_download.downloading', { progress: state.progress });
+    case 'paused':
+      return `${t('st.providers.webgpu_download.paused', { progress: state.progress })} ${t('st.providers.webgpu_download.paused_detail')}`;
+    case 'stopping':
+      return t('st.providers.webgpu_download.stopping');
+    case 'error':
+      return `${t('st.providers.webgpu_download.error')}: ${state.error || t('st.providers.webgpu_download.error_detail')}`;
+    default:
+      return t('st.providers.webgpu_download.required');
+  }
+}
+
+function renderWebgpuDownloadControl(id, state) {
+  const btn = document.querySelector(`.btn-webgpu-download[data-provider="${id}"]`);
+  const line = document.querySelector(`[data-webgpu-download-status="${id}"]`);
+  // When the user edits the Model field mid-download, the status for the
+  // newly displayed model is `not-downloaded` while `activeTransfer` still
+  // carries the running sibling transfer. Render the running transfer so its
+  // Stop control stays visible instead of flipping to Start with no way back.
+  // A distinct active transfer wins even when the displayed model is cached
+  // (ready): otherwise its remove action would delete the cached model while
+  // the sibling download runs hidden.
+  const display = webgpuDownloadControlState(state);
+  const transferActive = display !== state;
+  if (btn) {
+    btn.textContent = webgpuDownloadCardLabel(display);
+    btn.disabled = webgpuDownloadActionInFlight || ['checking', 'stopping'].includes(display.status);
+    // Stopping must target the running transfer, not the newly typed model.
+    if (transferActive && display.modelId) btn.dataset.activeTransferModel = display.modelId;
+    else delete btn.dataset.activeTransferModel;
+  }
+  if (line) {
+    line.textContent = transferActive && display.modelId
+      ? `${webgpuDownloadStatusLine(display)} (${display.modelId})`
+      : webgpuDownloadStatusLine(display);
+  }
+}
+
+function refreshWebgpuVisionCheckbox(model) {
+  const checkbox = document.querySelector('input[data-provider="webgpu"][data-key="supportsVision"]');
+  if (checkbox) checkbox.checked = webgpuModelSupportsVision(model);
+}
+
+function getDisplayedWebgpuModel(id = 'webgpu') {
+  const input = document.querySelector(`input[data-provider="${id}"][data-key="model"]`);
+  try {
+    return normalizeWebgpuModelId(input?.value || providersData[id]?.model);
+  } catch {
+    return String(input?.value || providersData[id]?.model || WEBGPU_DEFAULT_MODEL_ID).trim();
+  }
+}
+
+async function refreshWebgpuDownloadControls() {
+  const ids = [...new Set([...document.querySelectorAll('.btn-webgpu-download')].map(btn => btn.dataset.provider))];
+  if (!ids.length) {
+    if (webgpuDownloadPollTimer) {
+      clearInterval(webgpuDownloadPollTimer);
+      webgpuDownloadPollTimer = null;
+    }
+    return;
+  }
+  let active = false;
+  for (const id of ids) {
+    try {
+      const model = getDisplayedWebgpuModel(id);
+      const query = model ? { model } : {};
+      const state = normalizeWebgpuDownloadSnapshot(await sendToBackground('get_webgpu_download_status', query) || {});
+      renderWebgpuDownloadControl(id, state);
+      if (isActiveWebgpuTransfer(state) || isActiveWebgpuTransfer(state.activeTransfer)) active = true;
+    } catch (error) {
+      const line = document.querySelector(`[data-webgpu-download-status="${id}"]`);
+      if (line) line.textContent = String(error?.message || error);
+    }
+  }
+  if (active && !webgpuDownloadPollTimer) {
+    webgpuDownloadPollTimer = setInterval(refreshWebgpuDownloadControls, 2000);
+  } else if (!active && webgpuDownloadPollTimer) {
+    clearInterval(webgpuDownloadPollTimer);
+    webgpuDownloadPollTimer = null;
+  }
+}
+
+async function handleWebgpuDownloadButton(btn) {
+  const id = btn.dataset.provider;
+  if (webgpuDownloadActionInFlight) return;
+  webgpuDownloadActionInFlight = true;
+  let didFallbackProvider = false;
+  try {
+    btn.disabled = true;
+    // Persist any form changes on the WebGPU card first so the background
+    // provider configuration stays in sync with the user's selected model.
+    if (dirtyProviderIds.has(id)) {
+      await saveProvider(id, { showFlash: false });
+    }
+    const model = getDisplayedWebgpuModel(id);
+    const msg = model ? { model } : {};
+    const state = normalizeWebgpuDownloadSnapshot(await sendToBackground('get_webgpu_download_status', msg) || {});
+    // If the user typed a new model while a sibling transfer runs, the status
+    // for the displayed model is `not-downloaded` (or ready, when switching
+    // to a cached model) with the running transfer in `activeTransfer`.
+    // Stopping must target the running transfer so its Stop control keeps
+    // working instead of attempting to start a blocked download or deleting
+    // the cached displayed model while the sibling runs hidden.
+    const control = webgpuDownloadControlState(state);
+    const siblingActive = control !== state;
+    const stopTarget = { model: control.modelId || model, ...(control.dtype ? { dtype: control.dtype } : {}) };
+    if (state.ready || ['downloading', 'paused'].includes(state.status) || siblingActive) {
+      const removedReadyModel = state.ready === true && !siblingActive;
+      await sendToBackground('stop_webgpu_download', stopTarget);
+      // Removing a ready model while WebGPU is the selected chat provider
+      // would leave every subsequent chat failing its readiness check until
+      // the user re-downloads or manually picks another provider. Fall back
+      // to a usable provider so the selection stays functional.
+      if (removedReadyModel && id === activeProviderId) {
+        try {
+          const fallback = providersData?.webbrain_cloud
+            ? 'webbrain_cloud'
+            : Object.keys(providersData || {}).find((candidate) => candidate !== id && providerIsActive(candidate, providersData[candidate])) || 'webbrain_cloud';
+          await sendToBackground('set_active_provider', { providerId: fallback });
+          activeProviderId = fallback;
+          requestedActiveProviderId = fallback;
+          didFallbackProvider = true;
+        } catch {
+          // Keep the current selection; chat will report the missing download.
+        }
+      }
+    } else {
+      await sendToBackground('start_webgpu_download', msg);
+    }
+  } catch (error) {
+    const line = document.querySelector(`[data-webgpu-download-status="${id}"]`);
+    if (line) line.textContent = String(error?.message || error);
+  } finally {
+    webgpuDownloadActionInFlight = false;
+    await refreshWebgpuDownloadControls();
+    if (didFallbackProvider) {
+      try {
+        renderProviders();
+      } catch {
+        // Card re-render is best-effort; the status line above already updated.
+      }
+    }
+  }
+}
+
+async function refreshWebbrainPaymentNotice() {
+  if (!refreshWebbrainPaymentNotice._focusBound && typeof window !== 'undefined') {
+    window.addEventListener('focus', () => {
+      refreshWebbrainPaymentNotice._cache = null;
+      void refreshWebbrainPaymentNotice();
+    });
+    refreshWebbrainPaymentNotice._focusBound = true;
+  }
+  const notice = providersContainer.querySelector('.webbrain-payment-notice');
+  const deviceGuid = providersData.webbrain_cloud?.deviceGuid;
+  if (!notice || !deviceGuid) return;
+  const billingStatusUrl = typeof WEBBRAIN_BILLING_STATUS_URL === 'string'
+    ? WEBBRAIN_BILLING_STATUS_URL
+    : 'https://api.webbrain.one/v1/billing/status';
+  const renderNotice = (subscriptionStatus) => {
+    if (!notice.isConnected) return;
+    if (!['past_due', 'unpaid'].includes(subscriptionStatus)) {
+      notice.hidden = true;
+      notice.replaceChildren();
+      return;
+    }
+    const message = document.createElement('p');
+    message.textContent = t('st.account.payment_failed');
+    const link = document.createElement('a');
+    link.href = webbrainAccountUrl(deviceGuid);
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = t('st.account.update_payment');
+    notice.replaceChildren(message, link);
+    notice.style.cssText = 'margin-top:10px;padding:12px;border-radius:6px;border:1px solid var(--warning,#b7791f);';
+    notice.hidden = false;
+  };
+  // Reuse recent results during search, but refresh on focus or after 30 seconds.
+  const cached = refreshWebbrainPaymentNotice._cache;
+  if (cached?.deviceGuid === deviceGuid && Date.now() - cached.fetchedAt < 30000) {
+    renderNotice(cached.subscriptionStatus);
+    return;
+  }
+  try {
+    let statusPromise = refreshWebbrainPaymentNotice._inflight?.deviceGuid === deviceGuid
+      ? refreshWebbrainPaymentNotice._inflight.promise
+      : null;
+    if (!statusPromise) {
+      statusPromise = (async () => {
+        const response = await fetch(billingStatusUrl, {
+          headers: { 'X-WebBrain-Device-Id': deviceGuid },
+          cache: 'no-store',
+          credentials: 'omit',
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) return null;
+        const status = await response.json();
+        return status.subscription_status;
+      })();
+      refreshWebbrainPaymentNotice._inflight = { deviceGuid, promise: statusPromise };
+    }
+    const subscriptionStatus = await statusPromise;
+    if (refreshWebbrainPaymentNotice._inflight?.deviceGuid === deviceGuid) {
+      refreshWebbrainPaymentNotice._inflight = null;
+    }
+    if (subscriptionStatus == null) return;
+    refreshWebbrainPaymentNotice._cache = { deviceGuid, subscriptionStatus, fetchedAt: Date.now() };
+    renderNotice(subscriptionStatus);
+  } catch {
+    if (refreshWebbrainPaymentNotice._inflight?.deviceGuid === deviceGuid) {
+      refreshWebbrainPaymentNotice._inflight = null;
+    }
+    /* An unavailable billing check must not interrupt settings. */
+  }
+}
+
+function renderProviders() {
+  if (!providersContainer) return;
+  providersContainer.innerHTML = '';
+  void syncDecisionStatus();
+
+  // Field definitions reference i18n keys (labelKey) so switching languages
+  // re-renders with translated labels. Placeholders stay as raw values —
+  // they're example URLs or API key shapes and reading them in English is
+  // universal enough.
+  const providerConfigs = {
+    webbrain_cloud: {
+      fields: [],
+    },
+    llamacpp: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:8080' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'unsloth/Qwen3.8-27B-GGUF' },
+        CONTEXT_WINDOW_FIELD,
+        VISION_MODE_FIELD,
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    ollama: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:11434/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'qwen3.8:27b' },
+        CONTEXT_WINDOW_FIELD,
+        OLLAMA_VISION_MODE_FIELD,
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    ods: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:11434/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'select the running ODS model' },
+        CONTEXT_WINDOW_FIELD,
+        VISION_MODE_FIELD,
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    lmstudio: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:1234/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model_optional', type: 'text', placeholderKey: 'st.provider.field.model_loaded_hint' },
+        CONTEXT_WINDOW_FIELD,
+        VISION_MODE_FIELD,
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    osaurus: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://127.0.0.1:1337/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'llama-3.2-3b-instruct' },
+        CONTEXT_WINDOW_FIELD,
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    jan: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:1337/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'google/gemma-4-12B-it' },
+        CONTEXT_WINDOW_FIELD,
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    vllm: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:8000/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'Qwen/Qwen3.8-27B' },
+        CONTEXT_WINDOW_FIELD,
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    sglang: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:30000/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'Qwen/Qwen3.8-27B' },
+        CONTEXT_WINDOW_FIELD,
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    localai: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:8080/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'gpt-4' },
+        CONTEXT_WINDOW_FIELD,
+        VISION_MODE_FIELD,
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    gpt4all: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://localhost:4891/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'loaded model' },
+        CONTEXT_WINDOW_FIELD,
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    webbrain_companion: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://127.0.0.1:8327/v1' },
+        OPTIONAL_LOCAL_API_KEY_FIELD,
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'model listed in WebBrain Companion' },
+        LOCAL_PROXY_CONTEXT_WINDOW_FIELD,
+        VISION_MODE_FIELD,
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    local_openai_proxy: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://127.0.0.1:8317/v1' },
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'required — use the proxy client API key' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'model exposed by the proxy' },
+        LOCAL_PROXY_CONTEXT_WINDOW_FIELD,
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    unsloth: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.server_url', type: 'text', placeholder: 'http://127.0.0.1:8888/v1' },
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'sk-unsloth-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'model loaded in Unsloth Studio' },
+        CONTEXT_WINDOW_FIELD,
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    webgpu: {
+      fields: [
+        {
+          key: 'model',
+          labelKey: 'st.provider.field.model',
+          type: 'text',
+          placeholder: 'owner/repository',
+          suggestions: WEBGPU_SELECTABLE_MODEL_PRESETS.map(option => option.id),
+          suggestionLabels: Object.fromEntries(WEBGPU_SELECTABLE_MODEL_PRESETS.map(option => [
+            option.id,
+            `${option.label} — ${option.id}${option.supportsVision ? ` — ${t('st.provider.field.supports_vision')}` : ''}`,
+          ])),
+        },
+        WEBGPU_CONTEXT_WINDOW_FIELD,
+        // Vision support is fixed by the selected WebGPU model's graph files.
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox', disabled: true },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    azure_openai: {
+      fields: [
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://{resource}.openai.azure.com' },
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'Azure API key' },
+        { key: 'model', labelKey: 'st.provider.field.deployment_name', type: 'text', placeholder: 'my-deployment' },
+        { key: 'apiVersion', labelKey: 'st.provider.field.api_version', type: 'text', placeholder: '2024-10-21' },
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    aws_bedrock: {
+      fields: [
+        { key: 'region', labelKey: 'st.provider.field.aws_region', type: 'text', placeholder: 'us-east-1' },
+        { key: 'accessKeyId', labelKey: 'st.provider.field.aws_access_key_id', type: 'text', placeholder: 'AKIA...' },
+        { key: 'secretAccessKey', labelKey: 'st.provider.field.aws_secret_access_key', type: 'password', placeholder: '********' },
+        { key: 'sessionToken', labelKey: 'st.provider.field.aws_session_token', type: 'password', placeholder: 'optional (STS)' },
+        { key: 'model', labelKey: 'st.provider.field.bedrock_model_id', type: 'text', placeholder: 'anthropic.claude-sonnet-5' },
+        ...CACHE_AWARE_COST_ESTIMATE_FIELDS,
+      ],
+    },
+    openai: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'sk-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'gpt-5.6-terra',
+          suggestions: [
+            'gpt-6-luna-pro',
+            'gpt-6.1-sol',
+            'gpt-6-astra',
+            'gpt-5.6-terra',
+            'gpt-5.6-sol',
+            'gpt-5.6-luna',
+            'gpt-5.6',
+            'gpt-5.5-2026-04-23',
+            'gpt-5.5-pro-2026-04-23',
+            'gpt-5.4-2026-03-05',
+            'gpt-5.4-pro-2026-03-05',
+            'gpt-5.4-mini-2026-03-17',
+            'gpt-5.4-nano-2026-03-17',
+          ] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.openai.com/v1' },
+        ...OPENAI_COST_ESTIMATE_FIELDS,
+      ],
+    },
+    openrouter: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'sk-or-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'openrouter/free',
+          suggestions: ['openrouter/free', 'deepseek/deepseek-v4.1-flash-1017', 'google/gemini-4-argon', 'meta/muse-wonder', 'meta/muse-spark-open', 'anthropic/claude-opus-5.5', 'qwen/qwen3.8-27b', 'moonshotai/kimi-k3', 'z-ai/glm-5.3', 'minimax/minimax-m3'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://openrouter.ai/api/v1' },
+        PROMPT_TIER_FIELD,
+        TOOL_MODE_FIELD,
+        OPENROUTER_VISION_MODE_FIELD,
+      ],
+    },
+    huggingface: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'hf_...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'moonshotai/Kimi-K3',
+          suggestions: ['moonshotai/Kimi-K3', 'zai-org/GLM-5.2', 'Qwen/Qwen3.8-2.4T-A95B', 'Qwen/Qwen3.6-27B'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://router.huggingface.co/v1' },
+        // Hugging Face's catalog is huge and open-ended — unlike curated
+        // routers, model-name sniffing (openai.js supportsVision) can't
+        // reliably tell VLMs from text-only models, so expose an explicit
+        // toggle like the local providers do.
+        { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    fireworks: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'fw_...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'accounts/fireworks/models/kimi-k3',
+          suggestions: [
+            'accounts/fireworks/models/kimi-k3',
+            'accounts/fireworks/models/glm-5p2',
+            'accounts/fireworks/models/minimax-m3',
+            'accounts/fireworks/models/deepseek-v4-pro-0813',
+            'accounts/fireworks/models/qwen3p8-2p4t-a95b',
+          ] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.fireworks.ai/inference/v1' },
+        PROMPT_TIER_FIELD,
+      ],
+    },
+    anthropic: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'sk-ant-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'claude-opus-5',
+          suggestions: ['claude-fable-5', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-haiku-5-5', 'claude-haiku-4-5'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.anthropic.com' },
+        ...CACHE_AWARE_COST_ESTIMATE_FIELDS,
+      ],
+    },
+    gemini: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'AIza...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'gemini-3.1-pro',
+          suggestions: ['gemini-4-argon', 'gemini-3.1-pro', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    cloudflare: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'API token' },
+        { key: 'accountId', label: 'Cloudflare Account ID', type: 'text', placeholder: '0123456789abcdef0123456789abcdef' },
+        { key: 'gatewayId', label: 'AI Gateway ID (optional; @cf defaults to default)', type: 'text', placeholder: 'my-gateway' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: '@cf/zai-org/glm-5.2',
+          suggestions: ['@cf/zai-org/glm-5.2', '@cf/qwen/qwen3-30b-a3b-fp8'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    mistral: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'API key' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'mistral-medium-3.5',
+          suggestions: ['mistral-medium-3.5', 'mistral-large-latest', 'mistral-small-4', 'codestral-latest'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.mistral.ai/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    deepseek: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'sk-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'deepseek-flash',
+          suggestions: ['deepseek-flash', 'deepseek-v4-flash'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.deepseek.com' },
+        // Chat Completions is the default wire format; DeepSeek's Responses API
+        // is an opt-in that mainly adds JSON-schema structured output.
+        { key: 'apiFormat', labelKey: 'st.provider.field.api_format', type: 'select', collapsed: true,
+          options: [
+            { value: 'auto', label: 'Chat Completions (default)' },
+            { value: 'chat', label: 'Chat Completions' },
+            { value: 'responses', label: 'Responses API' },
+          ] },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    xai: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'xai-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'grok-4.6',
+          suggestions: ['grok-4.6', 'grok-4.5', 'grok-4.3', 'grok-build-0.1'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.x.ai/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    nvidia: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'nvapi-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'nvidia/nemotron-3-super-120b-a12b',
+          suggestions: ['nvidia/nemotron-3-super-120b-a12b', 'nvidia/nemotron-3-nano-30b-a3b', 'z-ai/glm-5.2', 'qwen/qwen3.5-397b-a17b', 'nvidia/llama-3.3-nemotron-super-49b-v1.5'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://integrate.api.nvidia.com/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    minimax: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'API key' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'MiniMax-M3',
+          suggestions: ['MiniMax-M3', 'MiniMax-M2.7'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.minimax.chat/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    kimi: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'sk-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'kimi-k3',
+          suggestions: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.moonshot.ai/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    alibaba: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'sk-...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'qwen3.8-max',
+          suggestions: ['qwen3.8-max', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.7-flash'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    together: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'tgp_...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'moonshotai/Kimi-K3',
+          suggestions: [
+            'moonshotai/Kimi-K3',
+            'zai-org/GLM-5.2',
+            'MiniMaxAI/MiniMax-M3',
+            'Qwen/Qwen3.8-2.4T-A95B',
+            'google/gemma-4-31B-it',
+          ] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.together.xyz/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    groq: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'gsk_...' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'openai/gpt-oss-120b',
+          suggestions: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.groq.com/openai/v1' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+    z_ai: {
+      fields: [
+        { key: 'apiKey', labelKey: 'st.provider.field.api_key', type: 'password', placeholder: 'API key' },
+        { key: 'model', labelKey: 'st.provider.field.model', type: 'text', placeholder: 'glm-5.3',
+          suggestions: ['glm-5.3', 'glm-5.2', 'glm-5.1', 'glm-5-turbo'] },
+        { key: 'baseUrl', labelKey: 'st.provider.field.api_base_url', type: 'text', placeholder: 'https://api.z.ai/api/paas/v4' },
+        ...COST_ESTIMATE_FIELDS,
+      ],
+    },
+  };
+
+  // Filter bar — sits above the list. Pill row, click-to-switch.
+  // "All" includes everything; the per-category pills hide cards whose
+  // `category` doesn't match. The selected provider is ALWAYS visible
+  // regardless of filter (so the user never loses track of it).
+  // Additional providers share a predictable OpenAI-compatible settings
+  // shape. Provider-specific suggestions/placeholders stay in the catalog;
+  // UI-only metadata is never persisted with credentials.
+  for (const [id, meta] of Object.entries(ADDITIONAL_PROVIDER_UI)) {
+    const config = providersData[id] || {};
+    const fields = [
+      {
+        key: 'apiKey',
+        labelKey: 'st.provider.field.api_key',
+        type: 'password',
+        placeholder: meta.apiKeyPlaceholder || 'API key',
+      },
+    ];
+    if (id === 'azure-cognitive-services') {
+      fields.push({ key: 'resource', label: 'Azure resource name', type: 'text', placeholder: 'my-resource' });
+    }
+    if (id === 'google-vertex' || id === 'google-vertex-anthropic') {
+      fields.push(
+        { key: 'project', label: 'Google Cloud project ID', type: 'text', placeholder: 'my-project' },
+        { key: 'location', label: 'Google Cloud location', type: 'text', placeholder: id === 'google-vertex' ? 'us-central1' : 'us-east5' },
+      );
+    }
+    fields.push(
+      {
+        key: 'model',
+        labelKey: 'st.provider.field.model',
+        type: 'text',
+        placeholder: config.model || (id === 'azure-cognitive-services' ? 'deployed-model-name' : 'model-id'),
+        suggestions: meta.suggestions || [],
+      },
+      {
+        key: 'baseUrl',
+        labelKey: 'st.provider.field.api_base_url',
+        type: 'text',
+        placeholder: config.baseUrl || 'https://provider.example/v1',
+      },
+      CONTEXT_WINDOW_FIELD,
+      { key: 'supportsVision', labelKey: 'st.provider.field.supports_vision', type: 'checkbox' },
+    );
+    if (config.category === 'router' || config.category === 'local') fields.push(PROMPT_TIER_FIELD);
+    fields.push(...COST_ESTIMATE_FIELDS);
+    providerConfigs[id] = { fields };
+  }
+
+  // Model limits are portable provider settings, not local-runtime-only
+  // details. Keep them optional and expose them on every configurable card.
+  for (const [id, definition] of Object.entries(providerConfigs)) {
+    if (id === 'webbrain_cloud' || !Array.isArray(definition.fields)) continue;
+    const keys = new Set(definition.fields.map(field => field.key));
+    if (!keys.has('contextWindow')) definition.fields.push(CONTEXT_WINDOW_FIELD);
+    if (!keys.has('maxOutputTokens')) definition.fields.push(MAX_OUTPUT_TOKENS_FIELD);
+    // Voluntary research sharing is opt-in per provider and never shown for
+    // WebBrain Compass itself.
+    if (!keys.has('shareQueriesForResearch')) definition.fields.push(SHARE_RESEARCH_FIELD);
+  }
+
+  providersContainer.appendChild(renderProviderFilterBar());
+
+  const pinnedProviderOrder = { webbrain_cloud: 0, webbrain_companion: 1 };
+  let entries = Object.entries(providersData)
+    .sort(([a], [b]) => (pinnedProviderOrder[a] ?? 2) - (pinnedProviderOrder[b] ?? 2));
+  const providerQuery = normalizeGeneralSearchText(providerSearchQuery);
+  if (providerQuery) {
+    entries = entries
+      .map((entry, index) => ({
+        entry,
+        index,
+        rank: providerSearchRank(entry[0], entry[1], providerQuery),
+      }))
+      .sort((a, b) => a.rank - b.rank || a.index - b.index)
+      .map(({ entry }) => entry);
+  }
+  let visibleCount = 0;
+  for (const [id, config] of entries) {
+    const isSelected = id === activeProviderId;
+    const isConfigured = id !== 'webbrain_cloud' && config.configured === true;
+    const definitionId = providerDefinitionId(id, config);
+    const fieldDefs = providerConfigs[definitionId]?.fields || [];
+
+    // Active is a strict status filter. Category filters keep the selected
+    // provider visible so users never lose track of the provider in use.
+    const category = config.category || 'cloud';
+    if (providerFilter === 'active' && !isConfigured) continue;
+    if (providerFilter !== 'all' && providerFilter !== 'active' && category !== providerFilter && !isSelected) continue;
+    if (providerQuery && !providerSearchTextForEntry(id, config, fieldDefs).includes(providerQuery)) continue;
+    visibleCount++;
+
+    const isCompanion = definitionId === 'webbrain_companion';
+    let topFieldsHTML = '';
+    let detailsFieldsHTML = '';
+    let fieldsHTML = '';
+    let collapsedFieldsHTML = '';
+    for (const field of fieldDefs) {
+      let fieldHTML = '';
+      const label = field.labelKey ? t(field.labelKey) : (field.label || field.key);
+      const placeholder = field.placeholderKey ? t(field.placeholderKey) : (field.placeholder || '');
+      if (field.type === 'select') {
+        const current = field.key === 'promptTier'
+          ? effectivePromptTier(config)
+          : (config[field.key] ?? field.options[0]?.value);
+        const optionsHTML = field.options
+          .map(o => `<option value="${escapeHtml(o.value)}"${o.value === current ? ' selected' : ''}>${escapeHtml(o.labelKey ? t(o.labelKey) : o.label)}</option>`)
+          .join('');
+        fieldHTML += `
+          <div class="field">
+            <label>${escapeHtml(label)}</label>
+            <select data-provider="${id}" data-key="${field.key}" data-type="select">${optionsHTML}</select>
+          </div>
+        `;
+        if (VISION_UI_PROVIDER_IDS.has(definitionId) && field.key === 'visionMode') {
+          const statusAttribute = definitionId === 'ollama' ? `data-ollama-vision-status="${id}"` : `data-vision-status="${id}"`;
+          fieldHTML += `<div class="field-hint" ${statusAttribute}${current === 'auto' ? '' : ' hidden'} style="margin:-4px 0 10px;font-size:12px;color:var(--text2);">${escapeHtml(t(visionStatusKey(id, config)))}</div>`;
+        }
+      } else if (field.type === 'checkbox') {
+        const isChecked = definitionId === 'webgpu' && field.key === 'supportsVision'
+          ? webgpuModelSupportsVision(config.model)
+          : !!config[field.key];
+        const checked = isChecked ? 'checked' : '';
+        fieldHTML += `
+          <div class="field" style="display:flex;align-items:center;gap:8px;flex-direction:row;">
+            <input type="checkbox" id="provider-${id}-${field.key}" data-provider="${id}" data-key="${field.key}" data-type="checkbox" ${checked} ${field.disabled ? 'disabled' : ''}
+                   style="width:auto;cursor:${field.disabled ? 'default' : 'pointer'};">
+            <label for="provider-${id}-${field.key}" style="margin:0;cursor:${field.disabled ? 'default' : 'pointer'};">${escapeHtml(label)}</label>
+          </div>
+        `;
+        if (field.hintKey) {
+          fieldHTML += `<div class="field-hint" style="margin:-4px 0 10px;font-size:12px;color:var(--text2);">${escapeHtml(t(field.hintKey))}</div>`;
+        }
+        } else if (field.suggestions && field.key === 'model') {
+        const rawVal = config[field.key] || '';
+        const isCustom = rawVal && !field.suggestions.includes(rawVal);
+        const isBlankDuplicate = config.isDuplicate && !rawVal;
+        const effectiveVal = rawVal || (isBlankDuplicate ? '' : field.suggestions[0]);
+        const selectVal = isBlankDuplicate ? '' : (isCustom ? '__custom__' : effectiveVal);
+        const optionsHTML = (isBlankDuplicate ? '<option value="" selected></option>' : '') + field.suggestions
+          .map(s => `<option value="${escapeHtml(s)}"${s === selectVal ? ' selected' : ''}>${escapeHtml(field.suggestionLabels?.[s] || s)}</option>`)
+          .join('') +
+          `<option value="__custom__"${isCustom ? ' selected' : ''}>${escapeHtml(t('st.provider.field.model_custom'))}</option>`;
+        fieldHTML += `
+          <div class="field">
+            <label>${escapeHtml(label)}</label>
+            <select class="model-select" data-model-for="${id}">${optionsHTML}</select>
+            <input type="text" data-provider="${id}" data-key="model"
+                   value="${escapeHtml(effectiveVal)}" placeholder="${escapeHtml(placeholder)}"
+                   style="${isCustom ? '' : 'display:none;'}margin-top:6px;">
+          </div>
+        `;
+      } else {
+        const localModelProviders = ['llamacpp', 'ollama', 'ods', 'lmstudio', 'osaurus', 'jan', 'vllm', 'sglang', 'localai', 'gpt4all', 'webbrain_companion', 'local_openai_proxy', 'unsloth'];
+        const canLoadModels = localModelProviders.includes(definitionId) && field.key === 'model';
+        const listAttr = canLoadModels ? `list="models-${id}"` : '';
+        const datalistHTML = canLoadModels ? `<datalist id="models-${id}"></datalist>` : '';
+        const loadedModelsDialogHTML = canLoadModels
+          ? `<dialog class="loaded-model-dialog" data-loaded-models-for="${id}"
+                     aria-labelledby="loaded-model-dialog-title-${id}">
+              <div class="loaded-model-dialog-panel">
+                <div class="loaded-model-dialog-header">
+                  <h3 id="loaded-model-dialog-title-${id}">${escapeHtml(t('st.providers.select_loaded_model'))}</h3>
+                  <button type="button" class="loaded-model-dialog-close"
+                          aria-label="${escapeHtml(t('sp.schedule_form.cancel'))}">&times;</button>
+                </div>
+                <div class="loaded-model-options" role="listbox"
+                     aria-label="${escapeHtml(t('st.providers.select_loaded_model'))}"></div>
+              </div>
+            </dialog>`
+          : '';
+        const loadBtnHTML = canLoadModels
+          ? `<button type="button" class="btn-secondary btn-load-models" data-provider="${id}"
+                    style="margin-top:6px;">${escapeHtml(t('st.providers.load_models'))}</button>
+             <span class="load-models-status" data-provider="${id}"
+                   style="margin-left:8px;font-size:12px;color:var(--text2);"></span>`
+          : '';
+        const apiKeyLink = (field.key === 'apiKey' && config.apiKeyUrl)
+          ? ` <a href="${escapeHtml(config.apiKeyUrl)}" target="_blank" rel="noopener noreferrer" style="font-size:11px;margin-left:6px;color:var(--accent,#4A90D9);text-decoration:none;">${escapeHtml(t('st.providers.get_api_key'))}</a>`
+          : '';
+        const minAttr = field.min != null ? ` min="${escapeHtml(field.min)}"` : '';
+        const stepAttr = field.step != null ? ` step="${escapeHtml(field.step)}"` : '';
+        const value = config[field.key] ?? '';
+        const manualAttr = (field.key === 'contextWindow' && config.manualContextWindow === true) ? ' data-manually-edited="true"' : '';
+        fieldHTML += `
+          <div class="field">
+            <label>${escapeHtml(label)}${apiKeyLink}</label>
+            <input type="${field.type}" data-provider="${id}" data-key="${field.key}" data-type="${field.type}" ${listAttr}${minAttr}${stepAttr}${manualAttr}
+                   value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}">
+            ${datalistHTML}
+            ${loadBtnHTML}
+            ${loadedModelsDialogHTML}
+          </div>
+        `;
+      }
+      if (isCompanion) {
+        if (field.key === 'model' || field.key === 'shareQueriesForResearch') {
+          topFieldsHTML += fieldHTML;
+        } else {
+          detailsFieldsHTML += fieldHTML;
+        }
+      } else if (field.collapsed) {
+        collapsedFieldsHTML += fieldHTML;
+      } else {
+        fieldsHTML += fieldHTML;
+      }
+    }
+    const compatibilitySettings = renderProviderCompatibilitySettings(id, config);
+    if (isCompanion) {
+      fieldsHTML = `
+        ${topFieldsHTML}
+        <details class="provider-compatibility provider-companion-details">
+          <summary>
+            <span class="provider-compatibility-title">${escapeHtml(t('st.providers.companion_guide.details'))}</span>
+          </summary>
+          <div class="provider-compatibility-body">
+            ${detailsFieldsHTML}
+            ${compatibilitySettings}
+          </div>
+        </details>
+      `;
+    } else if (collapsedFieldsHTML) {
+      fieldsHTML += `
+        <details class="provider-compatibility provider-local-auth">
+          <summary>
+            <span class="provider-compatibility-title">${escapeHtml(t('st.display.advanced'))}</span>
+            <span class="provider-compatibility-summary">${escapeHtml(t('st.provider.field.api_key'))}</span>
+          </summary>
+          <div class="provider-compatibility-body">${collapsedFieldsHTML}</div>
+        </details>
+      `;
+    }
+
+    const subscribeHref = id === 'webbrain_cloud' ? webbrainSubscribeUrl(config.deviceGuid) : '';
+    const accountHref = id === 'webbrain_cloud' ? webbrainAccountUrl(config.deviceGuid) : '';
+    const billingButton = id === 'webbrain_cloud'
+      ? `<button class="btn-secondary btn-manage-billing" data-href="${escapeHtml(accountHref)}"${config.deviceGuid ? '' : ' disabled'}>${escapeHtml(t('st.account.manage_billing'))}</button>`
+      : '';
+    let providerNote = '';
+    if (id === 'webbrain_cloud') {
+      const linkStyle = 'color:var(--accent,#4A90D9);text-decoration:none;';
+      const privacyLink = `<a href="https://webbrain.one/privacy" target="_blank" rel="noopener noreferrer"
+              style="${linkStyle}">${escapeHtml(t('st.providers.webbrain_note.privacy_link'))}</a>`;
+      const subscribeLink = `<a href="${escapeHtml(subscribeHref)}" target="_blank" rel="noopener noreferrer"
+              style="${linkStyle}">webbrain.one/subscribe</a>`;
+      const accountLink = `<a href="${escapeHtml(accountHref)}" target="_blank" rel="noopener noreferrer"
+              style="${linkStyle}">api.webbrain.one/account</a>`;
+      providerNote = `<div style="margin-top:10px;padding:10px 12px;border-radius:6px;
+                  background:rgba(74,144,217,0.08);border:1px solid rgba(74,144,217,0.22);
+                  font-size:12px;color:var(--text2);line-height:1.5;">
+           ${t('st.providers.webbrain_data_use.body', { privacyLink, subscribeLink, accountLink })}
+         </div>`;
+    }
+    const extensionOrigin = chrome.runtime.getURL('').replace(/\/$/, '');
+    const ollamaWarningTitleId = `ollama-warning-title-${id}`;
+    const ollamaWarning = definitionId === 'ollama'
+      ? `<aside class="provider-warning provider-ollama-warning" role="note"
+                aria-labelledby="${ollamaWarningTitleId}">
+           <div class="provider-warning-label">${escapeHtml(t('st.providers.ollama_warning.label'))}</div>
+           <strong class="provider-warning-title" id="${ollamaWarningTitleId}">${escapeHtml(t('st.providers.ollama_warning.title'))}</strong>
+           <p>${escapeHtml(t('st.providers.ollama_warning.body'))}</p>
+           <p>${escapeHtml(t('st.providers.ollama_warning.restart'))}</p>
+           <pre><code>OLLAMA_ORIGINS="${escapeHtml(extensionOrigin)}" ollama serve</code></pre>
+           <p>${escapeHtml(t('st.providers.ollama_warning.base_url'))}</p>
+           <a href="https://www.webbrain.one/blog/ollama-launch-handoff"
+              target="_blank" rel="noopener noreferrer">${escapeHtml(t('st.providers.ollama_warning.link'))} ↗</a>
+         </aside>`
+      : '';
+    const duplicateDisabledKey = !config.canDuplicate
+      ? 'st.providers.duplicate_unavailable'
+      : ((!isConfigured || dirtyProviderIds.has(id)) ? 'st.providers.duplicate_inactive' : '');
+
+    const subscriptionGuide = providerSubscriptionGuideHtml(definitionId);
+    const body = `
+      ${subscriptionGuide}
+      ${id !== 'webbrain_cloud' ? `<div class="field">
+        <label for="provider-title-${id}">${escapeHtml(t('st.providers.title'))}</label>
+        <input id="provider-title-${id}" type="text" data-provider="${id}" data-key="label"
+               value="${escapeHtml(providerDisplayLabel(id, config))}" maxlength="120" required>
+      </div>` : ''}
+      ${fieldsHTML}
+      ${providerNote}
+      ${id === 'webbrain_cloud' ? '<div class="webbrain-payment-notice" role="status" hidden></div>' : ''}
+      ${ollamaWarning}
+      ${isCompanion ? '' : compatibilitySettings}
+      <div class="btn-row">
+        <button class="btn-primary btn-save" data-provider="${id}">${escapeHtml(t('st.providers.save'))}</button>
+        <button class="btn-secondary btn-test" data-provider="${id}">${escapeHtml(t('st.providers.test'))}</button>
+        ${definitionId === 'webgpu' ? `<button class="btn-secondary btn-webgpu-download" data-provider="${id}">${escapeHtml(t('st.providers.webgpu_download.start'))}</button>` : ''}
+        ${billingButton}
+        ${!isSelected ? `<button class="btn-secondary btn-activate" data-provider="${id}">${escapeHtml(t('st.providers.select_for_chat'))}</button>` : ''}
+        <button class="btn-secondary btn-duplicate" data-provider="${id}"${duplicateDisabledKey ? ` disabled title="${escapeHtml(t(duplicateDisabledKey))}"` : ''}>${escapeHtml(t('st.providers.duplicate'))}</button>
+        ${config.isDuplicate ? `<button class="btn-secondary btn-remove-duplicate" data-provider="${id}">${escapeHtml(t('st.providers.remove_duplicate'))}</button>` : ''}
+      </div>
+      ${definitionId === 'webgpu' ? `<div class="webgpu-download-status" data-webgpu-download-status="${id}" style="margin-top:8px;font-size:12px;color:var(--text2);">${escapeHtml(t('st.providers.webgpu_download.checking'))}</div>` : ''}
+      <div class="test-result" id="test-${id}"></div>
+    `;
+
+    providersContainer.appendChild(wrapCollapsibleCard(id, config, isSelected, isConfigured, body));
+    const expanded = isSelected || expandedProviders.has(id);
+    if (!expanded && isCompanion) {
+      void checkAndAutoSelectCompanionModel(id);
+    }
+  }
+
+  // If the filter would leave the list empty (no cards match and no selected
+  // provider in this category either), tell the user. Don't make them
+  // guess why nothing is showing.
+  if (visibleCount === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-filter-empty';
+    empty.textContent = providerQuery
+      ? t('st.providers.search.empty')
+      : t('st.providers.filter.empty');
+    providersContainer.appendChild(empty);
+  }
+
+  refreshWebbrainPaymentNotice();
+  restoreProviderApiKeyWarnings();
+
+  document.querySelectorAll('.btn-save').forEach(btn => {
+    btn.addEventListener('click', () => saveProvider(btn.dataset.provider).catch(() => {}));
+  });
+  document.querySelectorAll('.btn-test').forEach(btn => {
+    btn.addEventListener('click', () => testProvider(btn.dataset.provider));
+  });
+  document.querySelectorAll('.btn-webgpu-download').forEach(btn => {
+    btn.addEventListener('click', () => handleWebgpuDownloadButton(btn));
+  });
+  refreshWebgpuDownloadControls();
+  document.querySelectorAll('.btn-activate').forEach(btn => {
+    btn.addEventListener('click', () => activateProvider(btn.dataset.provider));
+  });
+  document.querySelectorAll('.btn-duplicate').forEach(btn => {
+    btn.addEventListener('click', () => duplicateProvider(btn.dataset.provider));
+  });
+  document.querySelectorAll('input[data-provider], select[data-provider], textarea[data-provider]').forEach(input => {
+    const eventName = input.tagName === 'SELECT' ? 'change' : 'input';
+    input.addEventListener(eventName, () => {
+      markProviderDirty(input.dataset.provider);
+      if (input.dataset.key === 'contextWindow') {
+        input.dataset.manuallyEdited = 'true';
+        input.dataset.editVersion = String((Number(input.dataset.editVersion) || 0) + 1);
+      }
+    });
+  });
+  document.querySelectorAll('input[data-key="shareQueriesForResearch"]').forEach(input => {
+    input.addEventListener('click', (event) => {
+      // In click handlers, `input.checked` has already updated to the target
+      // state. Only prompt for confirmation when turning the toggle ON.
+      // preventDefault() cancels the click and rolls `checked` back to false.
+      if (!input.checked) return;
+      if (!window.confirm(t('st.providers.share_research.confirm'))) {
+        event.preventDefault();
+      }
+    });
+  });
+  document.querySelectorAll('.btn-remove-duplicate').forEach(btn => {
+    btn.addEventListener('click', () => removeDuplicateProvider(btn.dataset.provider));
+  });
+  document.querySelectorAll('.btn-load-models').forEach(btn => {
+    btn.addEventListener('click', () => loadProviderModels(btn.dataset.provider));
+  });
+  document.querySelectorAll('.btn-manage-billing').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const href = btn.dataset.href || '';
+      if (!href) return;
+      window.open(href, '_blank', 'noopener,noreferrer');
+    });
+  });
+  document.querySelectorAll('.model-select').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const providerId = sel.dataset.modelFor;
+      const input = document.querySelector(`input[data-provider="${providerId}"][data-key="model"]`);
+      if (!input) return;
+      if (sel.value === '__custom__') {
+        input.style.display = '';
+        input.value = '';
+        input.focus();
+      } else {
+        input.style.display = 'none';
+        input.value = sel.value;
+      }
+      if (providerId === 'webgpu' && sel.value !== '__custom__') {
+        const preset = WEBGPU_MODEL_PRESETS.find(option => option.id === sel.value);
+        if (preset?.contextWindow) {
+          const contextInput = document.querySelector(`input[data-provider="${providerId}"][data-key="contextWindow"]`);
+          if (contextInput) contextInput.value = String(preset.contextWindow);
+          if (providersData[providerId]) providersData[providerId].contextWindow = preset.contextWindow;
+        }
+      }
+      syncInferredOpenRouterRoutingVariant(providerId, input.value);
+      markProviderDirty(providerId);
+      refreshProviderCompatibilitySummary(providerId);
+      refreshVisionStatus(providerId);
+      if (providerId === 'webgpu') {
+        refreshWebgpuVisionCheckbox(input.value);
+        refreshWebgpuDownloadControls();
+      }
+    });
+  });
+  document.querySelectorAll('select[data-key="visionMode"]').forEach((select) => {
+    select.addEventListener('change', () => refreshVisionStatus(select.dataset.provider));
+  });
+  document.querySelector('select[data-provider="ollama"][data-key="visionMode"]')?.addEventListener('change', refreshOllamaVisionStatus);
+  document.querySelectorAll('.provider-compatibility select[data-provider], .provider-compatibility textarea[data-provider]').forEach((input) => {
+    const eventName = input.tagName === 'TEXTAREA' ? 'input' : 'change';
+    input.addEventListener(eventName, () => {
+      if (input.dataset.key === 'routingVariant') input.dataset.routingExplicit = 'true';
+      if (input.tagName === 'TEXTAREA') {
+        providerCompatibilityJsonDrafts.set(input.dataset.provider, input.value);
+      }
+      refreshProviderCompatibilitySummary(input.dataset.provider);
+    });
+  });
+  document.querySelectorAll('input[data-key="model"], input[data-key="baseUrl"]').forEach((input) => {
+    input.addEventListener('input', () => {
+      if (input.dataset.key === 'model') syncInferredOpenRouterRoutingVariant(input.dataset.provider, input.value);
+      refreshProviderCompatibilitySummary(input.dataset.provider);
+      refreshVisionStatus(input.dataset.provider);
+      if (providerDefinitionId(input.dataset.provider) === 'ollama') refreshVisionStatus(input.dataset.provider);
+      if (input.dataset.provider === 'webgpu' && input.dataset.key === 'model') {
+        refreshWebgpuVisionCheckbox(input.value);
+        refreshWebgpuDownloadControls();
+      }
+    });
+  });
+  document.querySelectorAll('.btn-reset-compatibility').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = button.dataset.provider;
+      const details = button.closest('.provider-compatibility');
+      details?.querySelectorAll('select[data-provider]').forEach((select) => {
+        if (select.dataset.key === 'routingVariant') {
+          select.value = 'standard';
+          select.dataset.routingExplicit = 'true';
+        } else {
+          select.value = 'auto';
+        }
+      });
+      const textarea = details?.querySelector('textarea[data-type="json"]');
+      if (textarea) {
+        textarea.value = '';
+        providerCompatibilityJsonDrafts.set(id, '');
+      }
+      markProviderDirty(id);
+      refreshProviderCompatibilitySummary(id);
+    });
+  });
+  document.querySelectorAll('.provider-compatibility[data-provider-id]').forEach((details) => {
+    refreshProviderCompatibilitySummary(details.dataset.providerId);
+  });
+  document.querySelectorAll('.loaded-model-dialog').forEach(dialog => {
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog || event.target.closest('.loaded-model-dialog-close')) {
+        closeLoadedModelDialog(dialog);
+        return;
+      }
+      const option = event.target.closest('.loaded-model-option');
+      if (!option) return;
+      const providerId = dialog.dataset.loadedModelsFor;
+      const input = document.querySelector(`input[data-provider="${providerId}"][data-key="model"]`);
+      if (!input) return;
+      const selectedModel = option.dataset.model || '';
+      input.value = selectedModel;
+      syncInferredOpenRouterRoutingVariant(providerId, selectedModel);
+      void saveProvider(providerId, { showFlash: false })
+        .then(() => detectProviderContextWindowForModel(providerId, selectedModel))
+        .catch(() => {});
+      closeLoadedModelDialog(dialog);
+    });
+  });
+}
+
+/**
+ * Build the filter pill row. Clicking a pill updates `providerFilter`,
+ * persists it to storage, and re-renders. Filters: all / active / local /
+ * cloud / router.
+ */
+function renderProviderFilterBar() {
+  const bar = document.createElement('div');
+  bar.className = 'provider-filter-bar';
+  const pills = document.createElement('div');
+  pills.className = 'provider-filter-pills';
+  // Small mono SVGs — category cues, not brand logos. Keep stroke icons so
+  // they track text color (including the active accent state).
+  const filterIcons = {
+    all: '<svg class="provider-filter-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>',
+    active: '<svg class="provider-filter-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></svg>',
+    local: '<svg class="provider-filter-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>',
+    cloud: '<svg class="provider-filter-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>',
+    router: '<svg class="provider-filter-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49"/><path d="M7.76 16.24a6 6 0 0 1 0-8.49"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>',
+  };
+  const filters = [
+    { key: 'all',    labelKey: 'st.providers.filter.all' },
+    { key: 'active', labelKey: 'st.providers.active' },
+    { key: 'local',  labelKey: 'st.providers.filter.local' },
+    { key: 'cloud',  labelKey: 'st.providers.filter.cloud' },
+    { key: 'router', labelKey: 'st.providers.filter.router' },
+  ];
+  const filterCounts = Object.entries(providersData).reduce((counts, [id, config]) => {
+    counts.all += 1;
+    if (providerIsActive(id, config)) counts.active += 1;
+    const category = config.category || 'cloud';
+    if (Object.hasOwn(counts, category) && category !== 'all') counts[category] += 1;
+    return counts;
+  }, { all: 0, active: 0, local: 0, cloud: 0, router: 0 });
+  for (const f of filters) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `provider-filter-pill${providerFilter === f.key ? ' active' : ''}`;
+    btn.dataset.filter = f.key;
+    btn.innerHTML = `${filterIcons[f.key] || ''}<span>${escapeHtml(t(f.labelKey))}</span>`
+      + `<span class="provider-filter-count">${filterCounts[f.key]}</span>`;
+    btn.addEventListener('click', async () => {
+      if (providerFilter === f.key) return;
+      // Snapshot whatever the user has typed but not yet saved BEFORE we
+      // rebuild the DOM — otherwise input values for the currently-rendered
+      // cards are lost (e.g. typed an API key, then clicked a filter pill
+      // to compare two providers).
+      syncInputsIntoProvidersData();
+      providerFilter = f.key;
+      await chrome.storage.local.set({ providerFilter: f.key }).catch(() => {});
+      renderProviders();
+    });
+    pills.appendChild(btn);
+  }
+  const search = document.createElement('div');
+  search.className = 'provider-search settings-search';
+  const input = document.createElement('input');
+  input.type = 'search';
+  input.id = 'input-provider-search';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.placeholder = t('st.providers.search.placeholder');
+  input.value = providerSearchQuery;
+  let providerSearchComposing = false;
+  const applyProviderSearchInput = () => {
+    // Firefox may emit a final input event while the old search is removed.
+    if (!input.isConnected) return;
+    const selectionStart = input.selectionStart ?? input.value.length;
+    const selectionEnd = input.selectionEnd ?? input.value.length;
+    syncInputsIntoProvidersData();
+    providerSearchQuery = input.value;
+    renderProviders();
+    const next = document.getElementById('input-provider-search');
+    if (!next) return;
+    next.focus();
+    try { next.setSelectionRange(selectionStart, selectionEnd); } catch { /* ignore */ }
+  };
+  input.addEventListener('compositionstart', () => {
+    providerSearchComposing = true;
+  });
+  input.addEventListener('compositionend', () => {
+    providerSearchComposing = false;
+    applyProviderSearchInput();
+  });
+  input.addEventListener('input', (event) => {
+    providerSearchQuery = input.value;
+    if (event.isComposing || providerSearchComposing) return;
+    applyProviderSearchInput();
+  });
+  search.appendChild(input);
+  bar.appendChild(pills);
+  bar.appendChild(search);
+  return bar;
+}
+
+/**
+ * Wrap a provider card's body in a collapsible shell. Selected provider
+ * starts expanded; everything else starts collapsed but the user can
+ * toggle individual cards open by clicking the header. Expansion state
+ * is session-only (resets on settings reload) — keeps the default
+ * predictable rather than reflecting whatever the user last poked at.
+ */
+function wrapCollapsibleCard(id, config, isSelected, isConfigured, bodyHtml) {
+  const expanded = isSelected || expandedProviders.has(id);
+  const card = document.createElement('div');
+  card.className = `provider-card ${isSelected ? 'selected' : ''} ${isConfigured ? 'configured' : ''} ${expanded ? 'expanded' : 'collapsed'}`;
+  card.dataset.providerId = id;
+  card.dataset.providerCategory = config.category || 'cloud';
+
+  const header = document.createElement('div');
+  header.className = 'provider-header provider-header-clickable';
+  // Model name appears in the collapsed header as small mono-font text — the
+  // headline question for any AI tool is "what model is this set to?", and
+  // making the user expand the card to find out is bad UX. Empty model (e.g.
+  // LM Studio defaults to whatever's loaded) just renders nothing rather
+  // than a placeholder, to avoid pretending we know what they're running.
+  const modelStr = (config.model && String(config.model).trim()) || '';
+  const label = providerDisplayLabel(id, config);
+  header.innerHTML = `
+    <div class="provider-header-left">
+      <span class="provider-chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+      ${providerIconHtml(providerDefinitionId(id, config), label)}
+      <span class="provider-name">${escapeHtml(label)}</span>
+      <span class="provider-type">${escapeHtml(config.type)}</span>
+      ${config.category ? `<span class="provider-category-badge provider-category-${escapeHtml(config.category)}">${escapeHtml(config.category)}</span>` : ''}
+      ${modelStr ? `<span class="provider-model" title="${escapeHtml(modelStr)}">${escapeHtml(modelStr)}</span>` : ''}
+    </div>
+    <span class="provider-status-badges">
+      ${isConfigured ? `<span class="provider-status-badge active">${escapeHtml(t('st.providers.active'))}</span>` : ''}
+      ${isSelected ? `<span class="provider-status-badge selected">${escapeHtml(t('st.providers.selected'))}</span>` : ''}
+    </span>
+  `;
+  header.addEventListener('click', (e) => {
+    // Ignore clicks that originated on inputs/buttons inside the header
+    // (none today, but future-proof).
+    if (e.target.closest('button, input, a, select')) return;
+    // Snapshot unsaved typing in other expanded cards before we rebuild
+    // the DOM — same reason as the filter-pill handler above.
+    syncInputsIntoProvidersData();
+    if (expandedProviders.has(id)) {
+      expandedProviders.delete(id);
+      companionAutoCheckedAt.delete(id);
+    } else {
+      expandedProviders.add(id);
+    }
+    renderProviders();
+  });
+
+  const body = document.createElement('div');
+  body.className = 'provider-body';
+  body.innerHTML = bodyHtml;
+
+  card.appendChild(header);
+  if (expanded && providerDefinitionId(id, config) === 'webbrain_companion') {
+    const summary = document.createElement('div');
+    summary.className = 'provider-companion-summary';
+    summary.innerHTML = `<p>${escapeHtml(t('st.providers.companion_guide.summary'))}</p>
+      <p>${escapeHtml(t('st.providers.companion_guide.supported'))}</p>`;
+    card.appendChild(summary);
+  }
+  if (expanded) card.appendChild(body);
+  return card;
+}
+
+function providerIsActive(id, config) {
+  return id !== 'webbrain_cloud' && config?.configured === true;
+}
+
+function markProviderDirty(id) {
+  if (!id || !providersData[id]) return;
+  dirtyProviderIds.add(id);
+  refreshProviderCardStatus(id);
+}
+
+function refreshActiveProviderFilterCount() {
+  const count = Object.entries(providersData)
+    .filter(([id, config]) => providerIsActive(id, config))
+    .length;
+  const countEl = document.querySelector('.provider-filter-pill[data-filter="active"] .provider-filter-count');
+  if (countEl) countEl.textContent = String(count);
+}
+
+function setProviderLoadModelsStatus(id, message, color = 'var(--text2)') {
+  const statusEl = document.querySelector(`.load-models-status[data-provider="${id}"]`);
+  if (!statusEl) return null;
+  statusEl.textContent = message;
+  statusEl.style.color = color;
+  return statusEl;
+}
+
+function providerModelLoadErrorMessage(resultOrError) {
+  if (resultOrError?.errorKey) return t(resultOrError.errorKey);
+  const message = String(typeof resultOrError === 'string' ? resultOrError : resultOrError?.error || '').trim();
+  if (/^HTTP\s+404\b/i.test(message) && /<!doctype\s+html|<html[\s>]|file not found/i.test(message)) {
+    return t('ob.tokens.none_status');
+  }
+  return message || 'Failed to load models';
+}
+
+function applyProviderBaseUrl(id, baseUrl) {
+  if (!baseUrl) return;
+  if (providersData[id]) providersData[id].baseUrl = baseUrl;
+  const input = document.querySelector(`input[data-provider="${id}"][data-key="baseUrl"]`);
+  if (input && input.value !== baseUrl) input.value = baseUrl;
+  refreshVisionStatus(id);
+}
+
+const providerContextPendingSnapshots = new Map();
+
+// What the context field looked like when a background request started. The
+// request returns the window the background already stored, so the field must
+// show it unless the user touched the field in the meantime. Each request keeps
+// its own snapshot, so overlapping Test connection / Load models / model picks
+// cannot consume or replace one another's.
+function markProviderContextDetectionStart(id) {
+  const input = document.querySelector(`input[data-provider="${id}"][data-key="contextWindow"]`);
+  if (!input) return undefined;
+  const snapshot = {
+    value: input.value,
+    manuallyEdited: input.dataset.manuallyEdited === 'true',
+    editVersion: Number(input.dataset.editVersion) || 0,
+  };
+  providerContextPendingSnapshots.set(id, snapshot);
+  return snapshot;
+}
+
+function clearProviderContextDetectionStart(id, snapshot) {
+  if (snapshot === undefined || providerContextPendingSnapshots.get(id) === snapshot) {
+    providerContextPendingSnapshots.delete(id);
+  }
+}
+
+function providerContextEditedSince(input, snapshot) {
+  return input.value !== snapshot.value
+    || (input.dataset.manuallyEdited === 'true') !== snapshot.manuallyEdited
+    || (Number(input.dataset.editVersion) || 0) !== snapshot.editVersion;
+}
+
+function applyProviderContextWindow(id, contextWindow, snapshot = providerContextPendingSnapshots.get(id)) {
+  const n = Number(contextWindow);
+  clearProviderContextDetectionStart(id, snapshot);
+  if (!Number.isFinite(n) || n <= 0) return;
+  const input = document.querySelector(`input[data-provider="${id}"][data-key="contextWindow"]`);
+  if (input) {
+    // Only an edit made after the request started wins. A manual value that
+    // was saved earlier and left alone is still replaced by a window the
+    // background decided to store (a live shrink, say), or the next Save would
+    // write the stale larger value back.
+    if (snapshot && providerContextEditedSince(input, snapshot)) return;
+    if (input.value !== String(n)) input.value = String(n);
+    input.dataset.manuallyEdited = 'false';
+  }
+  if (providersData[id]) {
+    providersData[id].contextWindow = n;
+    providersData[id].manualContextWindow = false;
+  }
+}
+
+async function detectProviderContextWindowForModel(id, model) {
+  const value = String(model || '').trim();
+  if (!value) return;
+  const snapshot = typeof markProviderContextDetectionStart === 'function'
+    ? markProviderContextDetectionStart(id)
+    : undefined;
+  try {
+    const res = await sendToBackground('detect_provider_context_window', { providerId: id, model: value });
+    if (res?.ok) applyProviderContextWindow(id, res.contextWindow, snapshot);
+  } catch {
+    // Model picking should still succeed if the backend cannot report a window.
+  } finally {
+    if (typeof clearProviderContextDetectionStart === 'function') {
+      clearProviderContextDetectionStart(id, snapshot);
+    }
+  }
+}
+
+function closeLoadedModelDialog(dialog) {
+  if (!dialog) return;
+  if (typeof dialog.close === 'function') dialog.close();
+  else dialog.removeAttribute('open');
+}
+
+function openLoadedModelDialog(dialog) {
+  if (!dialog) return;
+  if (dialog.open) return;
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', '');
+}
+
+function clearProviderLoadedModels(id) {
+  const loadedDialogEl = document.querySelector(`.loaded-model-dialog[data-loaded-models-for="${id}"]`);
+  if (loadedDialogEl) {
+    const optionsEl = loadedDialogEl.querySelector('.loaded-model-options');
+    if (optionsEl) optionsEl.innerHTML = '';
+    closeLoadedModelDialog(loadedDialogEl);
+  }
+  const datalistEl = document.getElementById(`models-${id}`);
+  if (datalistEl) datalistEl.innerHTML = '';
+}
+
+const providerModelLoadGenerations = new Map();
+const providerModelLoadSaveQueues = new Map();
+
+function queueProviderModelLoadSave(id, save) {
+  const previous = providerModelLoadSaveQueues.get(id) || Promise.resolve();
+  const queued = previous.catch(() => {}).then(save);
+  providerModelLoadSaveQueues.set(id, queued);
+  const clear = () => {
+    if (providerModelLoadSaveQueues.get(id) === queued) providerModelLoadSaveQueues.delete(id);
+  };
+  queued.then(clear, clear);
+  return queued;
+}
+
+async function loadProviderModels(id) {
+  let datalistEl = document.getElementById(`models-${id}`);
+  if (!datalistEl) return;
+  const generation = (providerModelLoadGenerations.get(id) || 0) + 1;
+  providerModelLoadGenerations.set(id, generation);
+  const isCurrent = () => providerModelLoadGenerations.get(id) === generation;
+  clearProviderLoadedModels(id);
+  // Persist whatever the user has typed in baseUrl/model so the background
+  // call uses the current values, not stale storage.
+  try {
+    await queueProviderModelLoadSave(id, async () => {
+      if (!isCurrent()) return;
+      await saveProvider(id, { showFlash: false, markConfigured: false });
+    });
+  } catch (e) {
+    if (!isCurrent()) return;
+    setProviderLoadModelsStatus(id, providerModelLoadErrorMessage(e.message), 'var(--danger, #c33)');
+    return;
+  }
+
+  if (!isCurrent()) return;
+  setProviderLoadModelsStatus(id, t('st.providers.loading'));
+  const contextSnapshot = typeof markProviderContextDetectionStart === 'function'
+    ? markProviderContextDetectionStart(id)
+    : undefined;
+  const releaseContextSnapshot = () => {
+    if (typeof clearProviderContextDetectionStart === 'function') clearProviderContextDetectionStart(id, contextSnapshot);
+  };
+  let res;
+  try {
+    res = await sendToBackground('list_provider_models', { providerId: id });
+  } catch (e) {
+    releaseContextSnapshot();
+    if (!isCurrent()) return;
+    setProviderLoadModelsStatus(id, providerModelLoadErrorMessage(e.message), 'var(--danger, #c33)');
+    return;
+  }
+
+  // The snapshot travels with this request (passed to apply below); the shared slot is free again.
+  releaseContextSnapshot();
+  if (!isCurrent()) return;
+  datalistEl = document.getElementById(`models-${id}`);
+  if (!datalistEl) return;
+  if (res?.ok) {
+    applyProviderBaseUrl(id, res.baseUrl);
+    applyProviderContextWindow(id, res.contextWindow, contextSnapshot);
+    const loadedDialogEl = document.querySelector(`.loaded-model-dialog[data-loaded-models-for="${id}"]`);
+    datalistEl.innerHTML = res.models
+      .map((m) => `<option value="${escapeHtml(m)}"></option>`)
+      .join('');
+    if (loadedDialogEl) {
+      const optionsEl = loadedDialogEl.querySelector('.loaded-model-options');
+      if (optionsEl) {
+        optionsEl.innerHTML = res.models
+          .map((m) => `<button type="button" class="loaded-model-option" role="option" data-model="${escapeHtml(m)}">${escapeHtml(m)}</button>`)
+          .join('');
+      }
+      if (res.models.length) openLoadedModelDialog(loadedDialogEl);
+    }
+    setProviderLoadModelsStatus(id, t('st.providers.models_loaded', { count: res.models.length }));
+  } else {
+    setProviderLoadModelsStatus(id, providerModelLoadErrorMessage(res), 'var(--danger, #c33)');
+  }
+}
+
+function setProviderTestResult(id, className, message, color) {
+  const testEl = document.getElementById(`test-${id}`);
+  if (!testEl) return null;
+  testEl.className = `test-result show${className ? ` ${className}` : ''}`;
+  testEl.textContent = message;
+  testEl.style.color = color || '';
+  return testEl;
+}
+
+async function saveProvider(id, { showFlash = true, markConfigured = true } = {}) {
+  const inputs = document.querySelectorAll(`input[data-provider="${id}"], select[data-provider="${id}"], textarea[data-provider="${id}"]`);
+  const config = {};
+  let apiKeyWarning = '';
+
+  try {
+    inputs.forEach(input => {
+      if (!shouldPersistProviderInput(input)) return;
+      const value = input.dataset.type === 'json'
+        ? parseProviderExtraBodyJson(input.value)
+        : providerInputValue(input);
+      setProviderConfigValue(config, input.dataset.key, value);
+      if (input.dataset.key === 'contextWindow') {
+        config.manualContextWindow = input.dataset.manuallyEdited === 'true';
+      }
+    });
+    if (typeof config.label === 'string') config.label = config.label.trim();
+    apiKeyWarning = providerApiKeyWarning(id, config);
+    const updateRes = await sendToBackground('update_provider', { providerId: id, config, markConfigured });
+    // updateProvider may fall back to another active provider (e.g. the active
+    // WebGPU model was edited to an undownloaded target). Sync the page-local
+    // selection so the Selected badge does not lie about subsequent chats.
+    if (updateRes && typeof updateRes.activeProviderId === 'string'
+        && updateRes.activeProviderId !== activeProviderId) {
+      activeProviderId = updateRes.activeProviderId;
+      requestedActiveProviderId = updateRes.activeProviderId;
+    }
+  } catch (e) {
+    if (showFlash) setProviderTestResult(id, 'fail', t('st.providers.failed', { error: e.message }));
+    throw e;
+  }
+  providerCompatibilityJsonDrafts.delete(id);
+  if (providersData[id]) {
+    const priorVisionDetection = providersData[id].visionDetection;
+    Object.assign(providersData[id], config);
+    if (VISION_UI_PROVIDER_IDS.has(providerDefinitionId(id, providersData[id])) && (
+      providersData[id].visionMode !== 'auto'
+      || !providerVisionDetectionMatches(id, providersData[id], priorVisionDetection)
+    )) {
+      providersData[id].visionDetection = null;
+    }
+    if (markConfigured) providersData[id].configured = id !== 'webbrain_cloud';
+  }
+  if (markConfigured) dirtyProviderIds.delete(id);
+  // If the background fell back to another active provider, re-render all
+  // cards so every Selected badge reflects the persisted selection.
+  if (requestedActiveProviderId === activeProviderId && document.querySelector('.provider-card')) {
+    const selectedCards = [...document.querySelectorAll('.provider-card.selected')].map((card) => card.dataset.providerId);
+    const shouldRerender = selectedCards.length !== 1 || selectedCards[0] !== activeProviderId;
+    if (shouldRerender) {
+      try {
+        syncInputsIntoProvidersData();
+      } catch {
+        // Draft preservation is best-effort; selection accuracy wins.
+      }
+      renderProviders();
+      refreshVisionStatus(id);
+      if (showFlash) {
+        if (apiKeyWarning) setProviderTestResult(id, 'warn', apiKeyWarning);
+        else {
+          const testEl = setProviderTestResult(id, 'ok', t('st.providers.saved'));
+          if (testEl) setTimeout(() => testEl.classList.remove('show'), 2000);
+        }
+      }
+      return;
+    }
+  }
+  refreshProviderCardStatus(id);
+  refreshVisionStatus(id);
+
+  if (showFlash) {
+    if (apiKeyWarning) {
+      setProviderTestResult(id, 'warn', apiKeyWarning);
+    } else {
+      const testEl = setProviderTestResult(id, 'ok', t('st.providers.saved'));
+      if (testEl) setTimeout(() => testEl.classList.remove('show'), 2000);
+    }
+  }
+}
+
+function refreshProviderCardStatus(id) {
+  // Saving a provider marks it configured without rebuilding the list. Keep
+  // the Active pill in sync even if the card disappeared during the request.
+  void syncDecisionStatus();
+  refreshActiveProviderFilterCount();
+  const card = document.querySelector(`.provider-card[data-provider-id="${id}"]`);
+  if (!card) return;
+  const isConfigured = providerIsActive(id, providersData[id]);
+  const isSelected = id === activeProviderId;
+  card.classList.toggle('configured', isConfigured);
+  card.classList.toggle('selected', isSelected);
+  const duplicateButton = card.querySelector('.btn-duplicate');
+  if (duplicateButton && providersData[id]?.canDuplicate) {
+    const requiresSave = !isConfigured || dirtyProviderIds.has(id);
+    duplicateButton.disabled = requiresSave;
+    if (!requiresSave) duplicateButton.removeAttribute('title');
+    else duplicateButton.title = t('st.providers.duplicate_inactive');
+  }
+  const name = card.querySelector('.provider-name');
+  if (name) name.textContent = providerDisplayLabel(id, providersData[id]);
+  const badges = card.querySelector('.provider-status-badges');
+  if (!badges) return;
+  badges.innerHTML = `
+    ${isConfigured ? `<span class="provider-status-badge active">${escapeHtml(t('st.providers.active'))}</span>` : ''}
+    ${isSelected ? `<span class="provider-status-badge selected">${escapeHtml(t('st.providers.selected'))}</span>` : ''}
+  `;
+}
+
+async function testProvider(id) {
+  // Skip the save-flash so its 2s auto-hide doesn't blank out the test result
+  // mid-flight on slow endpoints.
+  try {
+    await saveProvider(id, { showFlash: false, markConfigured: false });
+  } catch (e) {
+    setProviderTestResult(id, 'fail', t('st.providers.failed', { error: e.message }));
+    return;
+  }
+
+  if (!setProviderTestResult(id, '', t('st.providers.testing'), 'var(--text2)')) return;
+
+  const contextSnapshot = typeof markProviderContextDetectionStart === 'function'
+    ? markProviderContextDetectionStart(id)
+    : undefined;
+  try {
+    const res = await sendToBackground('test_provider', { providerId: id });
+    if (res.ok) {
+      applyProviderBaseUrl(id, res.baseUrl);
+      applyProviderContextWindow(id, res.contextWindow, contextSnapshot);
+      setProviderTestResult(id, 'ok', t('st.providers.connected', { model: res.model || t('st.providers.unknown_model') }));
+    } else {
+      setProviderTestResult(id, 'fail', t('st.providers.failed', { error: res.error }));
+    }
+  } catch (e) {
+    setProviderTestResult(id, 'fail', t('st.providers.failed', { error: e.message }));
+  } finally {
+    if (typeof clearProviderContextDetectionStart === 'function') clearProviderContextDetectionStart(id, contextSnapshot);
+  }
+}
+
+/**
+ * Snapshot any unsaved field values from the current DOM back into
+ * providersData so a subsequent renderProviders() preserves them.
+ * Without this, clicking "Select for chat" or any other action that re-renders
+ * silently throws away whatever the user has typed but not yet saved.
+ */
+function syncInputsIntoProvidersData() {
+  document.querySelectorAll('input[data-provider], select[data-provider], textarea[data-provider]').forEach((input) => {
+    const id = input.dataset.provider;
+    const key = input.dataset.key;
+    if (!id || !key || !providersData[id]) return;
+    if (!shouldPersistProviderInput(input)) return;
+    // Keep extraBody as a parsed object in memory (matches saveProvider and
+    // mergeProviderRequestBody). Invalid draft JSON is left unchanged so a
+    // partial edit does not corrupt the last-known-good object.
+    if (input.dataset.type === 'json') {
+      providerCompatibilityJsonDrafts.set(id, input.value);
+      try {
+        setProviderConfigValue(providersData[id], key, parseProviderExtraBodyJson(input.value));
+      } catch {
+        /* keep previous value */
+      }
+      return;
+    }
+    setProviderConfigValue(providersData[id], key, providerInputValue(input));
+    if (key === 'contextWindow') {
+      providersData[id].manualContextWindow = input.dataset.manuallyEdited === 'true';
+    }
+  });
+}
+
+const PROVIDER_REFRESH_MANAGED_KEYS = new Set([
+  'id',
+  'type',
+  'category',
+  'configured',
+  'duplicateOf',
+  'sourceProviderId',
+  'isDuplicate',
+  'hasDuplicate',
+  'canDuplicate',
+  'visionDetection',
+]);
+
+function restoreProviderDrafts(drafts) {
+  for (const [providerId, draft] of Object.entries(drafts || {})) {
+    const refreshed = providersData[providerId];
+    if (!refreshed || !draft) continue;
+    for (const [key, value] of Object.entries(draft)) {
+      if (!PROVIDER_REFRESH_MANAGED_KEYS.has(key)) refreshed[key] = value;
+    }
+  }
+}
+
+async function duplicateProvider(id) {
+  if (!providerIsActive(id, providersData[id]) || dirtyProviderIds.has(id)) return;
+  try {
+    syncInputsIntoProvidersData();
+    const providerDrafts = providersData;
+    const created = await sendToBackground('duplicate_provider', { providerId: id });
+    const refreshed = await sendToBackground('get_providers');
+    providersData = refreshed.providers;
+    activeProviderId = refreshed.active;
+    restoreProviderDrafts(providerDrafts);
+    expandedProviders.add(created.providerId);
+    providerSearchQuery = '';
+    if (providerFilter !== 'all' && providerFilter !== providersData[created.providerId]?.category) {
+      providerFilter = 'all';
+      await chrome.storage.local.set({ providerFilter }).catch(() => {});
+    }
+    renderProviders();
+    document.querySelector(`.provider-card[data-provider-id="${created.providerId}"]`)?.scrollIntoView({ block: 'nearest' });
+  } catch (error) {
+    setProviderTestResult(id, 'fail', t('st.providers.failed', { error: error.message }));
+  }
+}
+
+async function removeDuplicateProvider(id) {
+  if (!window.confirm(t('st.providers.remove_duplicate_confirm'))) return;
+  try {
+    syncInputsIntoProvidersData();
+    const providerDrafts = providersData;
+    await sendToBackground('remove_duplicate_provider', { providerId: id });
+    const refreshed = await sendToBackground('get_providers');
+    providersData = refreshed.providers;
+    activeProviderId = refreshed.active;
+    restoreProviderDrafts(providerDrafts);
+    expandedProviders.delete(id);
+    providerCompatibilityJsonDrafts.delete(id);
+    dirtyProviderIds.delete(id);
+    renderProviders();
+  } catch (error) {
+    setProviderTestResult(id, 'fail', t('st.providers.failed', { error: error.message }));
+  }
+}
+
+async function activateProvider(id) {
+  syncInputsIntoProvidersData();
+  requestedActiveProviderId = id;
+  const requestId = ++providerActivationRequestId;
+  try {
+    await saveProvider(id, { showFlash: false });
+    if (requestId !== providerActivationRequestId || requestedActiveProviderId !== id) return;
+    await sendToBackground('set_active_provider', { providerId: id });
+  } catch (e) {
+    if (requestId === providerActivationRequestId && requestedActiveProviderId === id) {
+      setProviderTestResult(id, 'fail', t('st.providers.failed', { error: e.message }));
+    }
+    return;
+  }
+  if (requestId !== providerActivationRequestId || requestedActiveProviderId !== id) {
+    const latestProviderId = requestedActiveProviderId;
+    if (latestProviderId) {
+      sendToBackground('set_active_provider', { providerId: latestProviderId }).catch(() => {});
+    }
+    return;
+  }
+  activeProviderId = id;
+  renderProviders();
+}
+
+function sendToBackground(action, data = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      { target: 'background', action, ...data },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else if (response?.error) {
+          reject(new Error(response.error));
+        } else {
+          resolve(response);
+        }
+      }
+    );
+  });
+}
+
+init();
+
+// Cookie banners (Advanced): tabs WebBrain works in (default), every website,
+// or off. The background reads the same key (src/agent/cookie-banner-host.js).
+const cookieBannersSelect = document.getElementById('select-cookie-banners');
+if (cookieBannersSelect) {
+  const normalizeCookieBanners = value => (['off', 'agent', 'everywhere'].includes(value) ? value : 'agent');
+  chrome.storage.local.get('cookieBanners')
+    .then(stored => { cookieBannersSelect.value = normalizeCookieBanners(stored?.cookieBanners); })
+    .catch(() => {});
+  cookieBannersSelect.addEventListener('change', () => {
+    chrome.storage.local.set({ cookieBanners: normalizeCookieBanners(cookieBannersSelect.value) }).catch(() => {});
+  });
+}

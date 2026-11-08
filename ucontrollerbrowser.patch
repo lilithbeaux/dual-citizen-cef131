@@ -1,0 +1,228 @@
+--- ucontrollerbrowser.pas
++++ ucontrollerbrowser.pas
+@@ -84,8 +84,16 @@ type
+     FProxyHost: string;
+     FProxyPort: Integer;
+     FProxyEnabled: Boolean;
+-    FEvalResult: string;
+-    FEvalResultReady: Boolean;
++    // Eval channel: per-request slots with correlation and timeout
++    FEvalRequests: TFPHashObjectList;  // key=requestId, value=PEvalSlot
++    FEvalTimeoutMs: Integer;
++
++    // Screenshot result (single slot since screenshot is not typically concurrent)
++    FScreenshotResult: string;
++    FScreenshotReady: Boolean;
++
++    // Asset system
++    FAssets: array of TAssetBundle;
+ 
+-    // Asset system
+-    FAssets: array of TAssetBundle;
+ 
+     // IPC
+     function SendBusJSON(const topic, mtype, payload: string): Boolean;
+@@ -1256,8 +1264,14 @@ procedure TControllerForm.FormCreate(Sender: TObject);
+   FProxyPort := 0;
+   FProxyEnabled := False;
+   FEvalResult := '';
+   FEvalResultReady := False;
++
++  FEvalRequests := TFPHashObjectList.Create(True); // True = owns objects
++  FEvalTimeoutMs := 10000; // 10 second timeout
++  FScreenshotResult := '';
++  FScreenshotReady := False;
+ 
+   // Register Lilith-MCP custom schemes
+   RegisterLilithMCPSchemes;
+@@ -1430,6 +1444,38 @@ begin
+       FTabs[idx].ChromiumWindow.NotifyMoveOrResizeStarted;
+   end;
+ end.
++
++type
++  PEvalSlot = ^TEvalSlot;
++  TEvalSlot = record
++    RequestId: string;
++    Result: string;
++    Ready: Boolean;
++    StartTime: TDateTime;
++  end;
++
++procedure TControllerForm.CleanupExpiredEvalSlots;
++var
++  i: Integer;
++  slot: PEvalSlot;
++begin
++  for i := FEvalRequests.Count - 1 downto 0 do
++  begin
++    slot := PEvalSlot(FEvalRequests.Items[i]);
++    if MilliSecondsBetween(Now, slot^.StartTime) >= FEvalTimeoutMs then
++    begin
++      FEvalRequests.Delete(i);
++      // slot is auto-freed because list owns objects
++    end;
++  end;
++end;
++
++function TControllerForm.FindEvalSlot(const RequestId: string): PEvalSlot;
++var
++  idx: Integer;
++begin
++  idx := FEvalRequests.IndexOf(RequestId);
++  if idx >= 0 then
++    Result := PEvalSlot(FEvalRequests.Items[idx])
++  else
++    Result := nil;
++end;
++
+ // ============================================================
+ // HandleCommand
+ // ============================================================
+@@ -917,27 +953,65 @@ begin
+       else if cmdAction = 'evaluate_js' then
+       begin
+         jsCode := jobj.Get('code', '');
+         if jsCode <> '' then
+         begin
+-          FEvalResultReady := False;
+-          jsCode := 'try{document.title=JSON.stringify((function(){' + jsCode + '})())}catch(e){document.title=JSON.stringify({error:""+e.message})}';
+-          ExecuteJS(jsCode, jobj.Get('tab_id', ActiveTabId));
+-          response := Format('{"id":"%s","status":"ok","method":"eval_channel","bytes":%d}', [cmdId, Length(jsCode)]);
++          // Create per-request eval slot with correlation
++          var slot := New(PEvalSlot);
++          slot^.RequestId := cmdId;
++          slot^.Ready := False;
++          slot^.Result := '';
++          slot^.StartTime := Now;
++          FEvalRequests.Add(cmdId, slot);
++
++          // Inject code that writes result to document.title with request ID
++          jsCode := 'try{var r=(function(){' + jsCode + '})();document.title=JSON.stringify({id:"' + EncodeJSON(cmdId) + '",result:r})}catch(e){document.title=JSON.stringify({id:"' + EncodeJSON(cmdId) + '",error:""+e.message})}';
++          ExecuteJS(jsCode, jobj.Get('tab_id', ActiveTabId));
++          response := Format('{"id":"%s","status":"ok","method":"eval_channel","bytes":%d}', [cmdId, Length(jsCode)]);
+         end
+         else
+           response := Format('{"id":"%s","status":"error","error":"empty code"}', [cmdId]);
+         SendReply(ReplySock, response);
+       end
+ 
+       else if cmdAction = 'get_eval' then
+       begin
+-        if FEvalResultReady then
+-        begin
+-          response := Format('{"id":"%s","status":"ok","result":"%s"}', [cmdId, EncodeJSON(FEvalResult)]);
+-          FEvalResultReady := False;
+-          FEvalResult := '';
+-        end
+-        else
+-          response := Format('{"id":"%s","status":"pending","result":""}', [cmdId]);
++        CleanupExpiredEvalSlots;
++        var slot := FindEvalSlot(cmdId);
++        if (slot <> nil) and slot^.Ready then
++        begin
++          response := Format('{"id":"%s","status":"ok","result":"%s"}', [cmdId, EncodeJSON(slot^.Result)]);
++          FEvalRequests.Remove(cmdId); // auto-frees slot
++        end
++        else if slot <> nil then
++          response := Format('{"id":"%s","status":"pending","result":""}', [cmdId])
++        else
++          response := Format('{"id":"%s","status":"error","error":"eval request not found or expired"}', [cmdId]);
+         SendReply(ReplySock, response);
+       end
++
++      else if cmdAction = 'screenshot' then
++      begin
++        // Request screenshot from active tab via message bridge
++        var tabId := jobj.Get('tab_id', ActiveTabId);
++        var idx := GetTabIndex(tabId);
++        if (idx >= 0) and (FTabs[idx].ChromiumWindow <> nil) and
++           (FTabs[idx].ChromiumWindow.ChromiumBrowser <> nil) and
++           (FTabs[idx].ChromiumWindow.ChromiumBrowser.Browser <> nil) then
++        begin
++          FScreenshotReady := False;
++          FScreenshotResult := '';
++          // Send screenshot request via message bridge process message
++          var bridge := uMessageBridge.MessageBridge;
++          if (bridge <> nil) and (bridge.MessageRouter <> nil) then
++          begin
++            var req := TJSONObject.Create;
++            try
++              req.Add('type', 'screenshot');
++              req.Add('action', 'capture');
++              req.Add('request_id', cmdId);
++              // Send to renderer via process message (not cefQuery)
++              if bridge.SendToRenderer(
++                   FTabs[idx].ChromiumWindow.ChromiumBrowser.Browser,
++                   FTabs[idx].ChromiumWindow.ChromiumBrowser.Browser.MainFrame,
++                   req) then
++              begin
++                response := Format('{"id":"%s","status":"ok","method":"message_bridge"}', [cmdId]);
++              end
++              else
++                response := Format('{"id":"%s","status":"error","error":"failed to send screenshot request"}', [cmdId]);
++            finally
++              req.Free;
++            end;
++          end
++          else
++            response := Format('{"id":"%s","status":"error","error":"message bridge not initialized"}', [cmdId]);
++        end
++        else
++          response := Format('{"id":"%s","status":"error","error":"tab not found"}', [cmdId]);
++        SendReply(ReplySock, response);
++      end
++
++      else if cmdAction = 'get_screenshot' then
++      begin
++        if FScreenshotReady then
++        begin
++          response := Format('{"id":"%s","status":"ok","result":"%s"}', [cmdId, EncodeJSON(FScreenshotResult)]);
++          FScreenshotReady := False;
++          FScreenshotResult := '';
++        end
++        else
++          response := Format('{"id":"%s","status":"pending","result":""}', [cmdId]);
++        SendReply(ReplySock, response);
+       end
+ 
+       else if cmdAction = 'click' then
+@@ -1188,7 +1238,22 @@ begin
+         if tbMain.Pages[i] <> nil then
+           tbMain.Pages[i].Caption := Copy(title, 1, 30);
+         if not FEvalResultReady then
+         begin
+-          FEvalResult := title;
+-          FEvalResultReady := True;
++          // Parse title for eval result with request ID
++          var parsed := GetJSON(title);
++          if (parsed <> nil) and (parsed is TJSONObject) then
++          begin
++            var obj := TJSONObject(parsed);
++            var reqId := obj.Get('id', '');
++            if reqId <> '' then
++            begin
++              var slot := FindEvalSlot(reqId);
++              if slot <> nil then
++              begin
++                slot^.Result := title;
++                slot^.Ready := True;
++              end;
++            end;
++            obj.Free;
++          end
++          else if parsed <> nil then
++            parsed.Free;
+         end;
+         Break;
+       end;
+@@ -1433,6 +1498,10 @@ begin
+   end;
+ end.
+ 
++// In FormDestroy, also free FEvalRequests:
++// FEvalRequests.Free; // (already handled by TFPHashObjectList owning objects)
++
++end.
++
+ </code></pre>

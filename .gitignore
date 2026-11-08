@@ -1,0 +1,19 @@
+# Build artifacts
+*.o
+*.ppu
+*.compiled
+*.res
+*.lpi
+*.bak-*
+backups/
+logs/
+dreams_all.json
+# Binaries
+dual_citizen_v2
+dual_citizen_reddit
+dual_citizen_facebook
+# IDE
+.idea/
+
+# Vendored third-party binaries (do not commit)
+extensions/webbrain/vendor/

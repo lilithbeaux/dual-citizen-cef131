@@ -1,0 +1,242 @@
+/**
+ * Serialize rendered chat DOM back to readable Markdown for durable history.
+ *
+ * textContent intentionally ignores visual structure such as <br> and block
+ * boundaries, while semantic elements such as <strong> have already consumed
+ * their Markdown markers. Walking the DOM preserves both forms of structure.
+ * Keep this module DOM-global-free so its traversal can be unit-tested in Node.
+ */
+
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+
+const BLOCK_TAGS = new Set([
+  'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DIV', 'DL', 'DT',
+  'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3',
+  'H4', 'H5', 'H6', 'HEADER', 'LI', 'MAIN', 'NAV', 'OL', 'P', 'PRE',
+  'SECTION', 'TABLE', 'TBODY', 'TD', 'TFOOT', 'TH', 'THEAD', 'TR', 'UL',
+]);
+
+const SKIPPED_TAGS = new Set(['SCRIPT', 'STYLE', 'TEMPLATE']);
+
+// The TeX source KaTeX keeps in <annotation encoding="application/x-tex">.
+function texAnnotation(node) {
+  for (const child of Array.from(node?.childNodes || [])) {
+    if (!child || child.nodeType !== ELEMENT_NODE) continue;
+    if (String(child.tagName || '').toUpperCase() === 'ANNOTATION'
+      && child.getAttribute?.('encoding') === 'application/x-tex') {
+      return String(child.textContent ?? '');
+    }
+    const found = texAnnotation(child);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function elementChildren(node) {
+  return Array.from(node?.childNodes || []).filter((child) => child && child.nodeType === ELEMENT_NODE);
+}
+
+function tableRowsFromElement(table) {
+  const rows = [];
+  const visit = (node) => {
+    if (!node || node.nodeType !== ELEMENT_NODE) return;
+    if (String(node.tagName || '').toUpperCase() === 'TR') {
+      rows.push(node);
+      return;
+    }
+    for (const child of node.childNodes || []) visit(child);
+  };
+  visit(table);
+  return rows;
+}
+
+function tableRowCells(row) {
+  return elementChildren(row).filter((child) => {
+    const tag = String(child.tagName || '').toUpperCase();
+    return tag === 'TH' || tag === 'TD';
+  });
+}
+
+function markdownTableCellText(cell) {
+  return historyTextFromElement(cell, { markdown: true })
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\|/g, '\\|');
+}
+
+function markdownTableFromElement(table) {
+  const rows = tableRowsFromElement(table);
+  if (!rows.length) return '';
+  const header = tableRowCells(rows[0]).map(markdownTableCellText);
+  if (!header.length) return '';
+  const lines = [
+    `| ${header.join(' | ')} |`,
+    `|${header.map(() => '---').join('|')}|`,
+  ];
+  for (const row of rows.slice(1)) {
+    const cells = tableRowCells(row).map(markdownTableCellText);
+    while (cells.length < header.length) cells.push('');
+    lines.push(`| ${cells.slice(0, header.length).join(' | ')} |`);
+  }
+  return lines.join('\n');
+}
+
+function tableElementFromNode(node) {
+  if (String(node?.tagName || '').toUpperCase() === 'TABLE') return node;
+  return elementChildren(node).find((child) => String(child.tagName || '').toUpperCase() === 'TABLE') || null;
+}
+
+export function historyTextFromElement(root, { markdown = true } = {}) {
+  if (!root) return '';
+  let output = '';
+
+  const trimTrailingHorizontalSpace = () => {
+    output = output.replace(/[ \t]+$/g, '');
+  };
+
+  const appendHardBreak = () => {
+    trimTrailingHorizontalSpace();
+    output += '\n';
+  };
+
+  const ensureBreak = () => {
+    trimTrailingHorizontalSpace();
+    if (output && !output.endsWith('\n')) output += '\n';
+  };
+
+  const visit = (node, isRoot = false, inPre = false) => {
+    if (!node) return;
+    if (node.nodeType === TEXT_NODE) {
+      output += String(node.nodeValue ?? node.textContent ?? '');
+      return;
+    }
+    if (node.nodeType !== ELEMENT_NODE) return;
+
+    const tagName = String(node.tagName || '').toUpperCase();
+    if (SKIPPED_TAGS.has(tagName)) return;
+    if (node.classList?.contains?.('code-block-header')) return;
+    // KaTeX output holds the formula three times (MathML, its TeX source and
+    // the visible HTML). Save the source with delimiters the panel renders
+    // again.
+    const display = node.classList?.contains?.('katex-display');
+    if (display || node.classList?.contains?.('katex')) {
+      const tex = texAnnotation(node);
+      if (tex !== null) {
+        output += display ? `$$${tex}$$` : `\\(${tex}\\)`;
+        return;
+      }
+    }
+    if (tagName === 'BR') {
+      // Every rendered <br> represents a source newline, including consecutive
+      // <br>s used for blank lines. Do not deduplicate these hard breaks.
+      appendHardBreak();
+      return;
+    }
+    if (tagName === 'HR') {
+      // Blank lines around it keep a saved rule from reading as the underline
+      // of a heading on the line above.
+      ensureBreak();
+      if (output && !output.endsWith('\n\n')) output += '\n';
+      output += '---\n\n';
+      return;
+    }
+
+    if (markdown && /^H[1-6]$/.test(tagName)) {
+      ensureBreak();
+      output += `${'#'.repeat(Number(tagName.slice(1)))} `;
+      for (const child of Array.from(node.childNodes || [])) visit(child);
+      ensureBreak();
+      return;
+    }
+    if (markdown && tagName === 'PRE') {
+      const language = String(node.parentElement?.querySelector?.('.code-lang')?.textContent || '').trim();
+      ensureBreak();
+      const beforeCode = output;
+      output = '';
+      for (const child of Array.from(node.childNodes || [])) visit(child, false, true);
+      ensureBreak();
+      const code = output;
+      // History must not reintroduce ambiguous fences around a Markdown
+      // document (or any code sample containing literal backtick runs).
+      const fenceCharacter = language.includes('`') ? '~' : '`';
+      let fenceLength = 3;
+      for (const match of code.matchAll(new RegExp(`${fenceCharacter}{3,}`, 'g'))) {
+        fenceLength = Math.max(fenceLength, match[0].length + 1);
+      }
+      const fence = fenceCharacter.repeat(fenceLength);
+      // Keep an info string separate from the fence so a label beginning with
+      // the same marker cannot extend the opener past its matching closer.
+      const info = language ? ` ${language}` : '';
+      output = `${beforeCode}${fence}${info}\n${code}${fence}`;
+      return;
+    }
+    if (markdown && tagName === 'CODE' && !inPre) {
+      output += '`';
+      for (const child of Array.from(node.childNodes || [])) visit(child);
+      output += '`';
+      return;
+    }
+    if (markdown && (tagName === 'STRONG' || tagName === 'B')) {
+      output += '**';
+      for (const child of Array.from(node.childNodes || [])) visit(child, false, inPre);
+      output += '**';
+      return;
+    }
+    if (markdown && (tagName === 'EM' || tagName === 'I')) {
+      output += '*';
+      for (const child of Array.from(node.childNodes || [])) visit(child, false, inPre);
+      output += '*';
+      return;
+    }
+    if (markdown && tagName === 'A') {
+      const href = String(node.getAttribute?.('href') || '');
+      if (href) output += '[';
+      for (const child of Array.from(node.childNodes || [])) visit(child, false, inPre);
+      if (href) output += `](${href})`;
+      return;
+    }
+    if (markdown && (tagName === 'UL' || tagName === 'OL')) {
+      // A rendered list goes back to Markdown the panel renders as one: a
+      // marker per item, and its further lines and nested lists indented
+      // under the marker.
+      const ordered = tagName === 'OL';
+      let number = Number.parseInt(String(node.getAttribute?.('start') ?? '1'), 10);
+      if (!Number.isSafeInteger(number) || number < 0) number = 1;
+      const items = [];
+      for (const item of elementChildren(node)) {
+        if (String(item.tagName || '').toUpperCase() !== 'LI') continue;
+        const marker = ordered ? `${number++}. ` : '- ';
+        const body = historyTextFromElement(item, { markdown: true }).replace(/^\n+|\s+$/g, '');
+        items.push(marker + body.split('\n')
+          .map((line, index) => (index && line ? ' '.repeat(marker.length) + line : line)).join('\n'));
+      }
+      if (items.length) {
+        ensureBreak();
+        output += items.join('\n');
+        ensureBreak();
+      }
+      return;
+    }
+    if (markdown && (tagName === 'TABLE' || node.classList?.contains?.('markdown-table-wrapper'))) {
+      const markdownTable = markdownTableFromElement(tableElementFromNode(node) || node);
+      if (markdownTable) {
+        ensureBreak();
+        output += markdownTable;
+        ensureBreak();
+      }
+      return;
+    }
+
+    const isBlock = !isRoot && BLOCK_TAGS.has(tagName);
+    const isRenderedCodeBlock = markdown && node.classList?.contains?.('code-block-wrapper');
+    if (isBlock) ensureBreak();
+    for (const child of Array.from(node.childNodes || [])) visit(child, false, inPre);
+    // formatMarkdown leaves the source newline after a fenced block as a
+    // sibling <br>. Do not also synthesize a block-boundary newline here.
+    if (isBlock && !isRenderedCodeBlock) ensureBreak();
+  };
+
+  visit(root, true);
+  return output;
+}

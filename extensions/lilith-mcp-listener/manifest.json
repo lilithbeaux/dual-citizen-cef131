@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Lilith-MCP Listener",
+  "version": "1.0.0",
+  "description": "Programmable page listener for CEF 131 Dual Citizen browser. MCP-controlled, extension+plugin dominion.",
+  "permissions": [
+    "webRequest",
+    "webRequestBlocking",
+    "tabs",
+    "storage",
+    "scripting",
+    "activeTab",
+    "<all_urls>"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "minimum_chrome_version": "102"
+}

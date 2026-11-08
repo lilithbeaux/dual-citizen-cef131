@@ -11,6 +11,245 @@
   const networkRequests = [];
   const consoleLogs = [];
 
+  // === MCP REGISTRY ===
+  const MCPRegistry = {
+    methods: new Map(),
+    schemas: new Map(),
+
+    registerMethod(name, handler, schema = null) {
+      this.methods.set(name, handler);
+      if (schema) this.schemas.set(name, schema);
+      return this;
+    },
+
+    unregisterMethod(name) {
+      this.methods.delete(name);
+      this.schemas.delete(name);
+      return this;
+    },
+
+    getMethod(name) {
+      return this.methods.get(name);
+    },
+
+    getSchema(name) {
+      return this.schemas.get(name);
+    },
+
+    listMethods() {
+      return Array.from(this.methods.keys());
+    },
+
+    async call(method, params) {
+      const handler = this.methods.get(method);
+      if (!handler) {
+        throw new Error(`MCP method not found: ${method}`);
+      }
+      return await handler(params);
+    },
+
+    validateParams(method, params) {
+      const schema = this.schemas.get(method);
+      if (!schema) return { valid: true };
+      // Basic JSON Schema validation (simplified)
+      try {
+        if (schema.required) {
+          for (const req of schema.required) {
+            if (!(req in params)) {
+              return { valid: false, error: `Missing required param: ${req}` };
+            }
+          }
+        }
+        return { valid: true };
+      } catch (e) {
+        return { valid: false, error: e.message };
+      }
+    }
+  };
+
+  // === HOTKEY REGISTRY ===
+  const HotkeyRegistry = {
+    hotkeys: new Map(),
+    globalListeners: new Map(),
+
+    register(name, combo, handler, scope = 'page') {
+      const normalized = this.normalizeCombo(combo);
+      this.hotkeys.set(name, { combo: normalized, handler, scope });
+      return this;
+    },
+
+    unregister(name) {
+      this.hotkeys.delete(name);
+      return this;
+    },
+
+    normalizeCombo(combo) {
+      return combo.toLowerCase().replace(/\s+/g, '').split('+').sort().join('+');
+    },
+
+    matchesCombo(event, combo) {
+      const parts = combo.split('+');
+      const modifiers = ['ctrl', 'alt', 'shift', 'meta'];
+      for (const mod of modifiers) {
+        const expected = parts.includes(mod);
+        const actual = event[mod + 'Key'];
+        if (expected !== actual) return false;
+      }
+      const key = parts.find(p => !modifiers.includes(p));
+      if (!key) return false;
+      const eventKey = event.key.toLowerCase();
+      return eventKey === key || event.code.toLowerCase() === 'key' + key.toUpperCase();
+    },
+
+    fire(name, event = null) {
+      const hk = this.hotkeys.get(name);
+      if (!hk) return false;
+      try {
+        hk.handler(event);
+        return true;
+      } catch (e) {
+        console.error('[HotkeyRegistry] Handler error:', e);
+        return false;
+      }
+    },
+
+    list() {
+      return Array.from(this.hotkeys.entries()).map(([name, hk]) => ({ name, combo: hk.combo, scope: hk.scope }));
+    },
+
+    installGlobalListener() {
+      if (this.globalListeners.has('keydown')) return;
+      const handler = (e) => {
+        for (const [name, hk] of this.hotkeys) {
+          if (hk.scope === 'global' && this.matchesCombo(e, hk.combo)) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.fire(name, { key: e.key, code: e.code, combo: hk.combo });
+          }
+        }
+      };
+      document.addEventListener('keydown', handler, true);
+      this.globalListeners.set('keydown', handler);
+    }
+  };
+
+  // === JSON-RPC 2.0 HANDLER ===
+  const JSONRPC = {
+    parse(message) {
+      try {
+        const parsed = JSON.parse(message);
+        if (!parsed.jsonrpc || parsed.jsonrpc !== '2.0') {
+          return { error: { code: -32600, message: 'Invalid JSON-RPC version' }, id: null };
+        }
+        return parsed;
+      } catch (e) {
+        return { error: { code: -32700, message: 'Parse error' }, id: null };
+      }
+    },
+
+    validateRequest(req) {
+      if (!req.method || typeof req.method !== 'string') {
+        return { code: -32600, message: 'Invalid Request: missing method' };
+      }
+      return null;
+    },
+
+    buildResponse(id, result) {
+      return JSON.stringify({ jsonrpc: '2.0', id, result });
+    },
+
+    buildErrorResponse(id, code, message, data = null) {
+      const err = { jsonrpc: '2.0', id, error: { code, message } };
+      if (data !== null) err.error.data = data;
+      return JSON.stringify(err);
+    },
+
+    async dispatch(request) {
+      const validation = this.validateRequest(request);
+      if (validation) return this.buildErrorResponse(request.id, validation.code, validation.message);
+
+      const { id, method, params = {} } = request;
+
+      // Handle MCP methods
+      if (method.startsWith('mcp.')) {
+        const mcpMethod = method.slice(4);
+        const validation = MCPRegistry.validateParams(mcpMethod, params);
+        if (!validation.valid) {
+          return this.buildErrorResponse(id, -32602, validation.error);
+        }
+        try {
+          const result = await MCPRegistry.call(mcpMethod, params);
+          return this.buildResponse(id, result);
+        } catch (e) {
+          return this.buildErrorResponse(id, -32603, e.message);
+        }
+      }
+
+      // Handle Hotkey methods
+      if (method.startsWith('hotkey.')) {
+        const hkMethod = method.slice(7);
+        try {
+          let result;
+          switch (hkMethod) {
+            case 'register':
+              HotkeyRegistry.register(params.name, params.combo, (e) => {
+                // We'll handle async fire via event emission
+              }, params.scope);
+              result = { registered: true };
+              break;
+            case 'fire':
+              result = { fired: HotkeyRegistry.fire(params.name) };
+              break;
+            case 'list':
+              result = { hotkeys: HotkeyRegistry.list() };
+              break;
+            case 'unregister':
+              HotkeyRegistry.unregister(params.name);
+              result = { unregistered: true };
+              break;
+            default:
+              return this.buildErrorResponse(id, -32601, `Unknown hotkey method: ${hkMethod}`);
+          }
+          return this.buildResponse(id, result);
+        } catch (e) {
+          return this.buildErrorResponse(id, -32603, e.message);
+        }
+      }
+
+      // Handle Agent methods (existing command set)
+      if (method.startsWith('agent.')) {
+        const agentMethod = method.slice(6);
+        try {
+          const result = await this.callAgentMethod(agentMethod, params);
+          return this.buildResponse(id, result);
+        } catch (e) {
+          return this.buildErrorResponse(id, -32603, e.message);
+        }
+      }
+
+      return this.buildErrorResponse(id, -32601, `Method not found: ${method}`);
+    },
+
+    async callAgentMethod(method, params) {
+      switch (method) {
+        case 'click': return await click(params.selector, params.options);
+        case 'type': return await type(params.selector, params.text, params.options);
+        case 'scroll': return await scroll(params.selector, params.x, params.y, params.options);
+        case 'screenshot': return await takeScreenshot(params.options);
+        case 'query': return await query(params.selector, params.attribute, params.options);
+        case 'waitForSelector': return await waitForSelector(params.selector, params.timeout);
+        case 'executeScript': return await executeScript(params.script, params.args);
+        case 'getNetworkLogs': return networkRequests;
+        case 'getConsoleLogs': return consoleLogs;
+        case 'on':
+          on(params.event, (data) => postMessage({ type: 'event', event: params.event, data, agentId: AGENT_ID }));
+          return { subscribed: true };
+        default: throw new Error(`Unknown agent method: ${method}`);
+      }
+    }
+  };
+
+  // === EXISTING UTILITIES (unchanged) ===
   function getAllShadowRoots(root = document) {
     const roots = [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
@@ -268,6 +507,20 @@
     postMessage({ type: 'response', id, result, error: error?.message });
   }
 
+  // === MCP MESSAGE HANDLER (NEW) ===
+  async function handleMCPMessage(message) {
+    try {
+      const request = JSONRPC.parse(message);
+      if (request.error) {
+        return JSONRPC.buildErrorResponse(request.id, request.error.code, request.error.message);
+      }
+      return await JSONRPC.dispatch(request);
+    } catch (e) {
+      return JSONRPC.buildErrorResponse(null, -32603, e.message);
+    }
+  }
+
+  // === EXISTING COMMAND HANDLER (kept for backward compat) ===
   async function handleMessage(event) {
     if (event.source !== window.parent) return;
     const msg = event.data;
@@ -287,6 +540,9 @@
         case 'getConsoleLogs': result = consoleLogs; break;
         case 'waitForSelector': result = await waitForSelector(params.selector, params.timeout); break;
         case 'executeScript': result = await executeScript(params.script, params.args); break;
+        case 'mcp': // NEW: MCP pass-through
+          result = await handleMCPMessage(params.message);
+          break;
         default: throw new Error(`Unknown command: ${command}`);
       }
       sendResponse(id, result);
@@ -299,6 +555,7 @@
     return () => { const arr = eventHandlers.get(event); const idx = arr.indexOf(handler); if (idx > -1) arr.splice(idx, 1); };
   }
 
+  // === EXISTING AGENT METHODS (unchanged) ===
   async function click(selector, options = {}) {
     const { fallbackSelectors, delay = true, force = false } = options;
     const selectors = [selector, ...(fallbackSelectors || [])];
@@ -430,7 +687,8 @@
     mutationObserver.observe(document, { childList: true, subtree: true, attributes: true, characterData: true, attributeOldValue: true, characterDataOldValue: true });
     setupNetworkListener(); setupConsoleListener();
     window.addEventListener('message', handleMessage);
-    postMessage({ type: 'ready', agentId: AGENT_ID, url: window.location.href });
+    HotkeyRegistry.installGlobalListener();
+    postMessage({ type: 'ready', agentId: AGENT_ID, url: window.location.href, mcpMethods: MCPRegistry.listMethods() });
     document.addEventListener('visibilitychange', () => emit('visibilitychange', { hidden: document.hidden }));
     window.addEventListener('beforeunload', () => { mutationObserver.disconnect(); postMessage({ type: 'unload', agentId: AGENT_ID }); });
   }
@@ -438,5 +696,53 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 
-  window.dcAgent = { click, type, scroll, screenshot: takeScreenshot, query, on, waitForSelector, executeScript, getNetworkLogs: () => networkRequests, getConsoleLogs: () => consoleLogs, agentId: AGENT_ID };
+  // === PUBLIC API ===
+  window.dcAgent = {
+    // Core agent methods
+    click, type, scroll, screenshot: takeScreenshot, query, on, waitForSelector, executeScript,
+    getNetworkLogs: () => networkRequests, getConsoleLogs: () => consoleLogs, agentId: AGENT_ID,
+
+    // MCP Registry
+    mcp: {
+      registerMethod: (name, handler, schema) => MCPRegistry.registerMethod(name, handler, schema),
+      unregisterMethod: (name) => MCPRegistry.unregisterMethod(name),
+      call: (method, params) => MCPRegistry.call(method, params),
+      listMethods: () => MCPRegistry.listMethods(),
+      getSchema: (name) => MCPRegistry.getSchema(name)
+    },
+
+    // Hotkey Registry
+    hotkey: {
+      register: (name, combo, handler, scope) => HotkeyRegistry.register(name, combo, handler, scope),
+      unregister: (name) => HotkeyRegistry.unregister(name),
+      fire: (name, event) => HotkeyRegistry.fire(name, event),
+      list: () => HotkeyRegistry.list()
+    },
+
+    // JSON-RPC
+    jsonrpc: {
+      dispatch: (message) => handleMCPMessage(message)
+    }
+  };
+  // === EVAL RESULT WATCHER ===
+  // Detects when window.__dc_eval_result is set (by evaluate_js) and
+  // propagates it to document.title with __DC_EVAL__ prefix so the Pascal
+  // DoTitleChange handler can capture it via FEvalResultReady.
+  (function(){
+    let _evalResult = undefined;
+    Object.defineProperty(window, '__dc_eval_result', {
+      get: function() { return _evalResult; },
+      set: function(v) {
+        _evalResult = v;
+        if (v !== undefined && v !== null) {
+          try {
+            document.title = '__DC_EVAL__' + JSON.stringify(v);
+          } catch(e) {}
+        }
+      },
+      configurable: true
+    });
+  })();
+
+
 })();

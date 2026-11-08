@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lilith-MCP Listener</title>
+<style>
+body{font-family:sans-serif;background:#111;color:#0f0;padding:1rem;width:420px}
+h1{margin:0 0 1rem;font-size:1.2rem}
+#status{color:#0f0;font-family:monospace;font-size:0.85rem;margin-bottom:1rem}
+button{background:#0a0;color:#fff;border:none;padding:0.5rem 1rem;margin:0.25rem;cursor:pointer;border-radius:4px}
+button:hover{background:#0c0}
+pre{background:#000;padding:0.5rem;border-radius:4px;overflow:auto;font-size:0.8rem}
+</style>
+</head>
+<body>
+<h1>Lilith-MCP Listener</h1>
+<div id="status">Ready</div>
+<button onclick="cmd('list_listeners')">List Listeners</button>
+<button onclick="cmd('title')">Get Title</button>
+<button onclick="cmd('url')">Get URL</button>
+<button onclick="cmd('form_fields')">Form Fields</button>
+<pre id="out"></pre>
+<script>
+async function cmd(action, params) {
+  const out = document.getElementById('out');
+  const status = document.getElementById('status');
+  status.textContent = 'sending...';
+  try {
+    const resp = await chrome.runtime.sendMessage({ kind: 'mcp_command', action, params });
+    out.textContent = JSON.stringify(resp, null, 2);
+    status.textContent = 'ok';
+  } catch (e) {
+    out.textContent = String(e);
+    status.textContent = 'error';
+  }
+}
+</script>
+</body>
+</html>

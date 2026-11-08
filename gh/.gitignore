@@ -1,0 +1,36 @@
+# ── Build artifacts ──────────────────────────────────────────────
+*.o
+*.ppu
+*.ppu
+*.or
+*.res
+*.compiled
+*.lrs
+*.exe
+*.so
+*.dylib
+*.a
+*.bak
+*.bak-*
+*.bak_apply
+*.bak_gemini
+*.patch
+*.log
+*.lpi.bak
+
+# ── CEF runtime (external, ~1.35 GB, not in repo) ────────────────
+cef-runtime/
+CEF4Delphi/
+
+# ── Runtime data / sockets / profiles ────────────────────────────
+/tmp/aethelgard_*.sock
+/tmp/dual_citizen_*.log
+*.config/
+profile_*/
+rootcache/
+
+# ── Editor / OS ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store

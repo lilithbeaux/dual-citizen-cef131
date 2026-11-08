@@ -46,7 +46,7 @@
       </Unit2>
       <Unit3>
         <Filename Value="umessagebridge.pas"/>
-        <IsPartOfProject Value="True"/>
+        <IsPartOfProject Value="False"/>
         <UnitName Value="uMessageBridge"/>
       </Unit3>
     </Units>
@@ -57,8 +57,8 @@
         <Win32GraphicApp Value="True"/>
       </Target>
       <SearchPaths>
-        <OtherUnitFiles Value=".;/home/lilareyon/CEF4Delphi/source;/home/lilareyon/CEF4Delphi/packages/lib/x86_64-linux"/>
-        <IncludeFiles Value=".;/home/lilareyon/CEF4Delphi/source"/>
+        <OtherUnitFiles Value=".;/home/veyron/CEF4Delphi/source;/home/veyron/CEF4Delphi/packages/lib/x86_64-linux"/>
+        <IncludeFiles Value=".;/home/veyron/CEF4Delphi/source"/>
         <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
       </SearchPaths>
       <Linking>
