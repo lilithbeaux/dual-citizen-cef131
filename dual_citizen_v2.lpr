@@ -118,6 +118,8 @@ begin
   GlobalCEFApp.AddCustomCommandLine('--disable-features=Accessibility');
   GlobalCEFApp.AddCustomCommandLine('--no-zygote-sandbox');
   GlobalCEFApp.AddCustomCommandLine('--force-dark-mode');
+  // Prevent GPU kill time-delayed segfault (CEF 131 root cause, 2026-10-21)
+  GlobalCEFApp.AddCustomCommandLine('--enable-unsafe-swiftshader');
 
   // 4. Extensions — passed as the VALUE of --load-extension.
   //    (Embedding '=path' inside the switch name makes Chromium see a switch
